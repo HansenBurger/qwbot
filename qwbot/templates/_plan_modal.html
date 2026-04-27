@@ -1,0 +1,64 @@
+<dialog class="modal" id="{{ modal_id }}">
+  <form class="modal-card" method="post" action="{{ form_action }}">
+    <div class="modal-header">
+      <h3>{{ modal_title }}</h3>
+      <button type="button" class="icon-button" data-close-modal="{{ modal_id }}" aria-label="关闭">×</button>
+    </div>
+
+    <div class="modal-grid">
+      <label>
+        <span>自然日历</span>
+        <input type="date" name="natural_date" value="{{ item.natural_date }}" required>
+      </label>
+      <label>
+        <span>系统当前会计日期</span>
+        <input type="date" name="current_accounting_date" value="{{ item.current_accounting_date }}">
+      </label>
+      <label>
+        <span>跑批后会计日期</span>
+        <input type="date" name="next_accounting_date" value="{{ item.next_accounting_date }}">
+      </label>
+      <label>
+        <span>节假日标志</span>
+        <select name="holiday_flag">
+          {% for option in ["N", "Y"] %}
+            <option value="{{ option }}" {% if item.holiday_flag == option %}selected{% endif %}>
+              {{ option }}{% if option == "Y" %}-是{% else %}-否{% endif %}
+            </option>
+          {% endfor %}
+        </select>
+      </label>
+      <label class="wide">
+        <span>说明</span>
+        <textarea name="description" rows="4" placeholder="如：罚息、复息计算" required>{{ item.description }}</textarea>
+      </label>
+      <label>
+        <span>提出人</span>
+        <input name="requester" value="{{ item.requester }}" placeholder="如：周芳倩、张浩源">
+      </label>
+      <label>
+        <span>执行状态</span>
+        <select name="execution_status">
+          {% for option in ["待执行", "进行中", "有阻塞", "已完成"] %}
+            <option value="{{ option }}" {% if item.execution_status == option %}selected{% endif %}>
+              {{ option }}
+            </option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>
+        <span>跑批启动时间</span>
+        <input type="time" name="batch_start_time" value="{{ item.batch_start_time }}">
+      </label>
+      <label class="wide block-reason-field">
+        <span>阻塞原因</span>
+        <textarea name="block_reason" rows="3" placeholder="状态为有阻塞时填写，例如：依赖数据未准备、缺陷待修复等">{{ item.block_reason }}</textarea>
+      </label>
+    </div>
+
+    <div class="modal-actions">
+      <button type="button" class="secondary-button" data-close-modal="{{ modal_id }}">取消</button>
+      <button type="submit">保存</button>
+    </div>
+  </form>
+</dialog>

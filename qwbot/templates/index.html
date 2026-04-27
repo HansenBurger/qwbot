@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>贷款核算测试登记</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <script defer src="{{ url_for('static', filename='app.js') }}"></script>
+  </head>
+  <body>
+    <main class="page">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">QWBot</p>
+          <h1>跑批计划维护</h1>
+          <p>维护贷款核算测试跑批计划；执行进度仍以企业微信在线文档为准。</p>
+        </div>
+        <div class="clock-card" aria-live="polite">
+          <span>当前日期与时间</span>
+          <strong data-clock-date>--</strong>
+          <time data-clock-time>--:--</time>
+        </div>
+      </header>
+
+      {% include "_batch_section.html" %}
+    </main>
+  </body>
+</html>

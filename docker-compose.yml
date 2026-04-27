@@ -1,0 +1,30 @@
+services:
+  web:
+    build: .
+    image: qwbot:latest
+    container_name: qwbot-web
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      LOCAL_STATUS_FILE: /app/data/sample_status.json
+      FRONTEND_URL: ${FRONTEND_URL:-http://0.0.0.0:5000}
+    ports:
+      - "${QWBOT_PORT:-5000}:5000"
+    volumes:
+      - ./data:/app/data
+
+  scheduler:
+    image: qwbot:latest
+    container_name: qwbot-scheduler
+    restart: unless-stopped
+    depends_on:
+      - web
+    env_file:
+      - .env
+    environment:
+      LOCAL_STATUS_FILE: /app/data/sample_status.json
+      FRONTEND_URL: ${FRONTEND_URL:-http://0.0.0.0:5000}
+    command: ["python", "-m", "qwbot.cli", "schedule"]
+    volumes:
+      - ./data:/app/data

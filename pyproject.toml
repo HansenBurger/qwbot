@@ -1,0 +1,27 @@
+[project]
+name = "qwbot"
+version = "0.1.0"
+description = "企业微信群机器人，用于推送贷款核算测试进度和跑批计划。"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "APScheduler>=3.10",
+    "Flask>=3.0",
+    "gunicorn>=22.0",
+    "python-dotenv>=1.0",
+    "requests>=2.31",
+]
+
+[project.scripts]
+qwbot = "qwbot.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["qwbot*"]
+exclude = ["data*"]
+
+[tool.setuptools.package-data]
+qwbot = ["templates/*.html", "static/*.css", "static/*.js"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

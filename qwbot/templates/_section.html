@@ -1,0 +1,53 @@
+<article class="card">
+  <div class="card-header">
+    <h2>{{ title }}</h2>
+    <span>{{ items | length }} 条</span>
+  </div>
+
+  <form class="entry-form" method="post" action="{{ url_for('create_item', collection=collection) }}">
+    <input type="date" name="date" aria-label="日期">
+    <select name="category" aria-label="类型">
+      <option value="{{ default_category }}">{{ default_category }}</option>
+      <option value="小环境跑批日历">小环境跑批日历</option>
+      <option value="长周期跑批日历">长周期跑批日历</option>
+      <option value="执行进度">执行进度</option>
+    </select>
+    <input name="content" placeholder="事项 / 计划 / 进度" required>
+    <input name="owner" placeholder="负责人">
+    <input name="status" placeholder="状态，如：待执行 / 进行中 / 已完成">
+    <button type="submit">新增</button>
+  </form>
+
+  <div class="items">
+    {% if items %}
+      {% for item in items %}
+        <form class="item" method="post" action="{{ url_for('edit_item', collection=collection, index=loop.index0) }}">
+          <input type="date" name="date" value="{{ item.date }}">
+          <select name="category">
+            {% for option in ["小环境跑批日历", "长周期跑批日历", "执行进度"] %}
+              <option value="{{ option }}" {% if item.category == option %}selected{% endif %}>
+                {{ option }}
+              </option>
+            {% endfor %}
+          </select>
+          <input name="content" value="{{ item.content }}" required>
+          <input name="owner" value="{{ item.owner }}" placeholder="负责人">
+          <input name="status" value="{{ item.status }}" placeholder="状态">
+          <div class="actions">
+            <button type="submit">保存</button>
+            <button
+              type="submit"
+              class="danger"
+              formmethod="post"
+              formaction="{{ url_for('remove_item', collection=collection, index=loop.index0) }}"
+            >
+              删除
+            </button>
+          </div>
+        </form>
+      {% endfor %}
+    {% else %}
+      <p class="empty">暂无记录，请先新增一条。</p>
+    {% endif %}
+  </div>
+</article>

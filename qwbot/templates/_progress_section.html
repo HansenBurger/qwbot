@@ -1,0 +1,78 @@
+<article class="card">
+  <div class="card-header">
+    <div>
+      <h2>执行进度</h2>
+      <p>用于登记当天执行情况、阻塞问题和负责人。</p>
+    </div>
+    <span>{{ progress | length }} 条</span>
+  </div>
+
+  <form class="entry-form progress-form" method="post" action="{{ url_for('create_item', collection='progress') }}">
+    <label>
+      <span>登记日期</span>
+      <input type="date" name="date">
+    </label>
+    <label class="wide">
+      <span>执行进度</span>
+      <textarea name="content" rows="2" placeholder="如：已完成 2026/1/25 到 2026/2/21 跑批校验" required></textarea>
+    </label>
+    <label>
+      <span>负责人</span>
+      <input name="owner" placeholder="负责人">
+    </label>
+    <label>
+      <span>状态</span>
+      <select name="status">
+        <option value="待更新">待更新</option>
+        <option value="进行中">进行中</option>
+        <option value="已完成">已完成</option>
+        <option value="有阻塞">有阻塞</option>
+      </select>
+    </label>
+    <button type="submit">新增执行进度</button>
+  </form>
+
+  <div class="items">
+    {% if progress %}
+      {% for item in progress %}
+        <form class="item progress-form" method="post" action="{{ url_for('edit_item', collection='progress', index=loop.index0) }}">
+          <label>
+            <span>登记日期</span>
+            <input type="date" name="date" value="{{ item.date }}">
+          </label>
+          <label class="wide">
+            <span>执行进度</span>
+            <textarea name="content" rows="2" required>{{ item.content }}</textarea>
+          </label>
+          <label>
+            <span>负责人</span>
+            <input name="owner" value="{{ item.owner }}">
+          </label>
+          <label>
+            <span>状态</span>
+            <select name="status">
+              {% for option in ["待更新", "进行中", "已完成", "有阻塞"] %}
+                <option value="{{ option }}" {% if item.status == option %}selected{% endif %}>
+                  {{ option }}
+                </option>
+              {% endfor %}
+            </select>
+          </label>
+          <div class="actions">
+            <button type="submit">保存</button>
+            <button
+              type="submit"
+              class="danger"
+              formmethod="post"
+              formaction="{{ url_for('remove_item', collection='progress', index=loop.index0) }}"
+            >
+              删除
+            </button>
+          </div>
+        </form>
+      {% endfor %}
+    {% else %}
+      <p class="empty">暂无执行进度，请先新增一条。</p>
+    {% endif %}
+  </div>
+</article>

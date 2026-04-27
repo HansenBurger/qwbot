@@ -1,0 +1,166 @@
+<article class="card">
+  <div class="card-header">
+    <div>
+      <h2>跑批计划</h2>
+      <p>
+        {% if view == "archived" %}
+          当前展示已执行完成的归档计划。
+        {% else %}
+          默认按自然日历升序展示已建立但未执行完成的计划。
+        {% endif %}
+      </p>
+    </div>
+    <div class="toolbar">
+      <a class="ghost-button {% if view != 'archived' %}active{% endif %}" href="{{ url_for('index') }}">
+        未执行 {{ active_count }}
+      </a>
+      <a class="ghost-button {% if view == 'archived' %}active{% endif %}" href="{{ url_for('index', view='archived') }}">
+        已归档 {{ archived_count }}
+      </a>
+      {% if view != "archived" %}
+        <button type="button" data-open-modal="create-plan">新建计划</button>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="table-wrap">
+    {% if batch_plan %}
+      <table class="plan-table">
+        <thead>
+          <tr>
+            <th>自然日历</th>
+            <th>系统当前会计日期</th>
+            <th>跑批后会计日期</th>
+            <th>节假日</th>
+            <th>启动时间</th>
+            <th>说明</th>
+            <th>提出人</th>
+            <th>状态</th>
+            {% if view != "archived" %}
+              <th class="actions-column">操作</th>
+            {% endif %}
+          </tr>
+        </thead>
+        <tbody>
+          {% for entry in batch_plan %}
+            {% set item = entry.item %}
+            <tr>
+              <td>{{ item.natural_date or "-" }}</td>
+              <td>{{ item.current_accounting_date or "-" }}</td>
+              <td>{{ item.next_accounting_date or "-" }}</td>
+              <td>
+                <span class="pill holiday-{{ item.holiday_flag or 'N' }}">{{ item.holiday_flag or "N" }}</span>
+              </td>
+              <td>{{ item.batch_start_time or "-" }}</td>
+              <td class="description-cell">{{ item.description or item.content or "-" }}</td>
+              <td>{{ item.requester or item.owner or "-" }}</td>
+              <td class="status-cell">
+                <span class="status status-{{ item.execution_status or item.status or '待执行' }}">{{ item.execution_status or item.status or "待执行" }}</span>
+              </td>
+              {% if view != "archived" %}
+                <td class="row-actions">
+                  {% if entry.can_start %}
+                    <form method="post" action="{{ url_for('start_item', index=entry.index) }}">
+                      <button type="submit" class="link-button" data-confirm="确认通知批量开始执行？">开始</button>
+                    </form>
+                  {% endif %}
+                  {% if entry.can_complete %}
+                    <form method="post" action="{{ url_for('complete_item', index=entry.index) }}">
+                      <button type="submit" class="link-button" data-confirm="确认通知批量执行完成？">完成</button>
+                    </form>
+                  {% endif %}
+                  {% if entry.is_sequence_blocked %}
+                    <span class="blocked-inline">需先处理阻塞</span>
+                  {% endif %}
+                  <button type="button" class="link-button" data-open-modal="edit-plan-{{ entry.index }}">修改</button>
+                  <form method="post" action="{{ url_for('remove_item', collection='batch_plan', index=entry.index) }}">
+                    <button type="submit" class="link-button danger-text" data-confirm="确认删除这条跑批计划？">删除</button>
+                  </form>
+                  <form method="post" action="{{ url_for('archive_item', index=entry.index) }}">
+                    <button type="submit" class="link-button" data-confirm="确认归档这条跑批计划？">归档</button>
+                  </form>
+                </td>
+              {% endif %}
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <p class="empty">
+        {% if view == "archived" %}
+          暂无已归档跑批计划。
+        {% else %}
+          暂无未执行跑批计划，请点击“新建计划”添加。
+        {% endif %}
+      </p>
+    {% endif %}
+  </div>
+</article>
+
+<section class="board">
+  <div class="board-header">
+    <div>
+      <h2>阻塞看板</h2>
+      <p>状态为“有阻塞”的跑批计划会自动出现在这里，便于集中跟踪原因。</p>
+    </div>
+    <span>{{ blocked_plan | length }} 项</span>
+  </div>
+
+  {% if blocked_plan %}
+    <div class="blocked-grid">
+      {% for entry in blocked_plan %}
+        {% set item = entry.item %}
+        <article class="blocked-card">
+          <div class="blocked-card-title">
+            <span class="status status-有阻塞">有阻塞</span>
+            <strong>{{ item.natural_date or "-" }}</strong>
+          </div>
+          <p class="blocked-description">{{ item.description or item.content or "-" }}</p>
+          <dl>
+            <div>
+              <dt>会计日期</dt>
+              <dd>{{ item.current_accounting_date or "-" }} -> {{ item.next_accounting_date or "-" }}</dd>
+            </div>
+            <div>
+              <dt>提出人</dt>
+              <dd>{{ item.requester or item.owner or "-" }}</dd>
+            </div>
+            <div>
+              <dt>阻塞原因</dt>
+              <dd>{{ item.block_reason or "未填写" }}</dd>
+            </div>
+          </dl>
+          <button type="button" class="link-button" data-open-modal="edit-plan-{{ entry.index }}">修改</button>
+        </article>
+      {% endfor %}
+    </div>
+  {% else %}
+    <p class="empty board-empty">暂无阻塞事项。</p>
+  {% endif %}
+</section>
+
+{% set modal_id = "create-plan" %}
+{% set modal_title = "新建跑批计划" %}
+{% set form_action = url_for('create_item', collection='batch_plan') %}
+{% set item = {
+  "natural_date": today,
+  "current_accounting_date": "",
+  "next_accounting_date": "",
+  "holiday_flag": "N",
+  "description": "",
+  "requester": "",
+  "execution_status": "待执行",
+  "block_reason": "",
+  "batch_start_time": ""
+} %}
+{% include "_plan_modal.html" %}
+
+{% if view != "archived" %}
+  {% for entry in batch_plan %}
+    {% set modal_id = "edit-plan-" ~ entry.index %}
+    {% set modal_title = "修改跑批计划" %}
+    {% set form_action = url_for('edit_item', collection='batch_plan', index=entry.index) %}
+    {% set item = entry.item %}
+    {% include "_plan_modal.html" %}
+  {% endfor %}
+{% endif %}

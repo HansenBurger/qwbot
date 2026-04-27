@@ -1,0 +1,17 @@
+.env
+.env.*
+!.env.example
+!.env.deploy.example
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
+data/*.json
+!data/.gitkeep
+tmp/
+*.log
