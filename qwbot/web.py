@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from flask import Flask, redirect, render_template, request, url_for
 
@@ -31,11 +32,20 @@ def create_app(settings: Settings) -> Flask:
     @app.get("/")
     def index():
         payload = load_status_file(status_file)
-        _archive_completed_from_previous_days(status_file, payload)
+        _archive_completed_from_previous_days(status_file, payload, settings.timezone)
         view = request.args.get("view", "active")
         filters = _archive_filters_from_request()
-        archived_entries = _batch_items_for_view(payload["batch_plan"], "archived", filters)
-        active_entries = _batch_items_for_view(payload["batch_plan"], "active")
+        archived_entries = _batch_items_for_view(
+            payload["batch_plan"],
+            "archived",
+            filters,
+            settings.timezone,
+        )
+        active_entries = _batch_items_for_view(
+            payload["batch_plan"],
+            "active",
+            timezone=settings.timezone,
+        )
         pagination = _paginate_entries(
             archived_entries if view == "archived" else active_entries,
             page=_int_arg("page", 1),
@@ -44,12 +54,12 @@ def create_app(settings: Settings) -> Flask:
         return render_template(
             "index.html",
             batch_plan=pagination["items"],
-            blocked_plan=_blocked_items(payload["batch_plan"]),
+            blocked_plan=_blocked_items(payload["batch_plan"], settings.timezone),
             active_count=len(active_entries),
             archived_count=len(archived_entries),
             archive_filters=filters,
             pagination=pagination,
-            today=date.today().isoformat(),
+            today=_today_iso(settings.timezone),
             view=view,
             status_file=_display_path(status_file),
         )
@@ -67,10 +77,10 @@ def create_app(settings: Settings) -> Flask:
         if collection == "batch_plan" and not _can_edit_item(existing_item):
             return redirect(url_for("index"))
         item = _item_from_form()
-        _apply_completion_metadata(existing_item, item)
+        _apply_completion_metadata(existing_item, item, settings.timezone)
         update_item(status_file, collection, index, item)
         if collection == "batch_plan":
-            _sync_block_events(status_file, index, existing_item, item)
+            _sync_block_events(status_file, index, existing_item, item, settings.timezone)
         return redirect(url_for("index"))
 
     @app.post("/items/<collection>/<int:index>/delete")
@@ -90,7 +100,7 @@ def create_app(settings: Settings) -> Flask:
         if not is_completed(item):
             return redirect(url_for("index"))
         item["archived"] = "true"
-        item["archived_on"] = date.today().isoformat()
+        item["archived_on"] = _today_iso(settings.timezone)
         update_item(status_file, "batch_plan", index, item)
         return redirect(url_for("index"))
 
@@ -104,8 +114,8 @@ def create_app(settings: Settings) -> Flask:
             return redirect(url_for("index"))
 
         item["execution_status"] = "进行中"
-        item["started_on"] = date.today().isoformat()
-        item["started_at"] = _now_iso()
+        item["started_on"] = _today_iso(settings.timezone)
+        item["started_at"] = _now_iso(settings.timezone)
         update_item(status_file, "batch_plan", index, item)
         WeComWebhookClient(settings.webhook_url).send_text(
             build_batch_start_notice(item),
@@ -123,8 +133,8 @@ def create_app(settings: Settings) -> Flask:
             return redirect(url_for("index"))
 
         item["execution_status"] = "已完成"
-        item["completed_on"] = date.today().isoformat()
-        item["completed_at"] = _now_iso()
+        item["completed_on"] = _today_iso(settings.timezone)
+        item["completed_at"] = _now_iso(settings.timezone)
         item["execution_seconds"] = str(_duration_seconds(item.get("started_at"), item["completed_at"]))
         next_entry = next_batch_after(payload["batch_plan"], index)
         update_item(status_file, "batch_plan", index, item)
@@ -139,7 +149,7 @@ def create_app(settings: Settings) -> Flask:
         if _is_archived(item) or _execution_status(item) != "有阻塞":
             return redirect(url_for("index"))
 
-        close_open_block(status_file, index)
+        close_open_block(status_file, index, _now_iso(settings.timezone))
         item["execution_status"] = "进行中"
         item["block_reason"] = ""
         update_item(status_file, "batch_plan", index, item)
@@ -194,6 +204,7 @@ def _batch_items_for_view(
     items: list[dict[str, object]],
     view: str,
     filters: dict[str, str] | None = None,
+    timezone: str = "Asia/Shanghai",
 ) -> list[dict[str, object]]:
     archived = view == "archived"
     indexed_items = [
@@ -204,7 +215,7 @@ def _batch_items_for_view(
     sorted_items = sorted(indexed_items, key=lambda entry: sort_key(entry["item"]))
     if not archived:
         _attach_execution_permissions(sorted_items)
-    _attach_metrics(sorted_items)
+    _attach_metrics(sorted_items, timezone)
     return sorted_items
 
 
@@ -253,7 +264,7 @@ def _is_archived(item: dict[str, object]) -> bool:
     return item.get("archived") == "true"
 
 
-def _blocked_items(items: list[dict[str, object]]) -> list[dict[str, object]]:
+def _blocked_items(items: list[dict[str, object]], timezone: str = "Asia/Shanghai") -> list[dict[str, object]]:
     current_item = _current_running_or_blocked_item(items)
     if not current_item:
         return []
@@ -275,6 +286,7 @@ def _blocked_items(items: list[dict[str, object]]) -> list[dict[str, object]]:
             _block_event_entry(
                 batch_index=int(current_item.get("id") or 0),
                 event=event,
+                timezone=timezone,
             )
             for event in events
         ],
@@ -294,10 +306,14 @@ def _current_running_or_blocked_item(items: list[dict[str, object]]) -> dict[str
     return sorted(candidates, key=sort_key)[0]
 
 
-def _block_event_entry(batch_index: int, event: dict[str, object]) -> dict[str, object]:
+def _block_event_entry(
+    batch_index: int,
+    event: dict[str, object],
+    timezone: str = "Asia/Shanghai",
+) -> dict[str, object]:
     is_open = not event.get("ended_at")
     duration_seconds = (
-        _duration_seconds(event.get("started_at"), _now_iso())
+        _duration_seconds(event.get("started_at"), _now_iso(timezone))
         if is_open
         else int(event.get("duration_seconds") or 0)
     )
@@ -373,13 +389,22 @@ def _can_delete_item(item: dict[str, object]) -> bool:
     return _execution_status(item) == "待执行"
 
 
-def _apply_completion_metadata(existing_item: dict[str, str], item: dict[str, str]) -> None:
+def _apply_completion_metadata(
+    existing_item: dict[str, str],
+    item: dict[str, str],
+    timezone: str = "Asia/Shanghai",
+) -> None:
     status = item.get("execution_status")
     existing_status = existing_item.get("execution_status") or existing_item.get("status")
     if status == "已完成":
-        item["completed_on"] = existing_item.get("completed_on") or date.today().isoformat()
+        completed_at = existing_item.get("completed_at") or _now_iso(timezone)
+        item["completed_on"] = existing_item.get("completed_on") or _today_iso(timezone)
+        item["completed_at"] = completed_at
+        item["execution_seconds"] = str(_duration_seconds(existing_item.get("started_at"), completed_at))
     elif existing_status == "已完成":
         item["completed_on"] = ""
+        item["completed_at"] = ""
+        item["execution_seconds"] = "0"
 
 
 def _sync_block_events(
@@ -387,22 +412,23 @@ def _sync_block_events(
     index: int,
     existing_item: dict[str, object],
     item: dict[str, str],
+    timezone: str = "Asia/Shanghai",
 ) -> None:
     old_status = _execution_status(existing_item)
     new_status = _execution_status(item)
     if new_status == "有阻塞":
         reason = item.get("block_reason", "")
         if old_status != "有阻塞" or not has_open_block(status_file, index):
-            add_block_event(status_file, index, reason)
+            add_block_event(status_file, index, reason, _now_iso(timezone))
         else:
             update_open_block_reason(status_file, index, reason)
         return
 
     if old_status == "有阻塞":
-        close_open_block(status_file, index)
+        close_open_block(status_file, index, _now_iso(timezone))
 
 
-def _attach_metrics(entries: list[dict[str, object]]) -> None:
+def _attach_metrics(entries: list[dict[str, object]], timezone: str = "Asia/Shanghai") -> None:
     for entry in entries:
         item = entry["item"]
         block_total = int(item.get("block_total_seconds") or 0)
@@ -413,7 +439,7 @@ def _attach_metrics(entries: list[dict[str, object]]) -> None:
         active_event = item.get("active_block_event")
         if active_event:
             item["active_block_duration"] = _format_duration(
-                _duration_seconds(active_event.get("started_at"), _now_iso())
+                _duration_seconds(active_event.get("started_at"), _now_iso(timezone))
             )
         else:
             item["active_block_duration"] = "-"
@@ -422,8 +448,9 @@ def _attach_metrics(entries: list[dict[str, object]]) -> None:
 def _archive_completed_from_previous_days(
     status_file: Path,
     payload: dict[str, list[dict[str, str]]],
+    timezone: str = "Asia/Shanghai",
 ) -> None:
-    today = date.today().isoformat()
+    today = _today_iso(timezone)
     changed = False
     for item in payload["batch_plan"]:
         if _is_archived(item):
@@ -441,8 +468,12 @@ def _archive_completed_from_previous_days(
                 update_item(status_file, "batch_plan", int(item["id"]), item)
 
 
-def _now_iso() -> str:
-    return datetime.now().replace(microsecond=0).isoformat()
+def _today_iso(timezone: str) -> str:
+    return datetime.now(ZoneInfo(timezone)).date().isoformat()
+
+
+def _now_iso(timezone: str) -> str:
+    return datetime.now(ZoneInfo(timezone)).replace(microsecond=0, tzinfo=None).isoformat()
 
 
 def _duration_seconds(started_at: object, ended_at: object) -> int:
@@ -470,11 +501,11 @@ def _format_duration(seconds: int) -> str:
 
 def _format_time_of_day(value: object) -> str:
     if not value:
-        return "0点0分"
+        return "-"
     try:
         parsed = datetime.fromisoformat(str(value))
     except ValueError:
-        return "0点0分"
+        return "-"
     return f"{parsed.hour}点{parsed.minute}分"
 
 
