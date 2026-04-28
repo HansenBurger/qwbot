@@ -8,7 +8,7 @@
 - 支持立即发送、预览消息、webhook 连通性测试和常驻定时发送。
 - 支持本地维护页面登记跑批计划。
 - 支持从企业微信在线文档导出的 JSON/CSV 地址读取“跑批计划”和“执行进度”。
-- 未配置在线文档地址时，默认读取 `data/sample_status.json` 作为本地样例数据。
+- 未配置在线文档地址时，默认从 `data/sample_status.json` 首次迁移到 SQLite，并以 `data/qwbot.sqlite3` 作为运行态数据。
 
 ## 快速开始
 
@@ -18,7 +18,7 @@ python -m venv .venv
 pip install -e .
 ```
 
-项目已创建本地 `.env`，其中包含当前群机器人的 webhook。`.env` 已加入 `.gitignore`，不要提交到仓库。
+项目已创建本地 `.env`，其中包含当前群机器人的 webhook。`.env` 已加入 `.gitignore`，不要提交到仓库。可分别配置生产群和自测群机器人，通过 `WECOM_WEBHOOK_TARGET` 或 CLI 的 `--webhook test|prod` 选择发送目标。
 
 预览将要发送的消息：
 
@@ -58,7 +58,7 @@ python -m qwbot.cli schedule
 python -m qwbot.cli web
 ```
 
-打开 `http://127.0.0.1:5000`，即可维护跑批计划。页面默认按自然日历升序展示未归档计划；新建和修改通过弹窗完成；未归档计划可通过操作列手动归档。状态改为“已完成”后当天仍保留在未归档列表，第二天打开页面时会自动归档。已归档记录为只读，不支持修改或删除。状态为“有阻塞”时需要填写阻塞原因，并会自动展示在跑批计划下方的阻塞看板。未归档计划支持维护“跑批启动时间”；点击“开始”会通知批量开始执行并 `@所有人`，点击“完成”会通知已完成批量和下一批量。页面保存的数据会写入 `data/sample_status.json`，机器人预览、立即发送和定时发送都会读取未归档的跑批计划。
+打开 `http://127.0.0.1:5000`，即可维护跑批计划。页面默认按自然日历、跑批前交易日期、跑批后交易日期升序展示未归档计划；新建和修改通过弹窗完成；只有“已完成”计划允许归档，“待执行”允许修改和删除，“进行中/有阻塞”只允许修改。状态改为“已完成”后当天仍保留在未归档列表，第二天打开页面时会自动归档。已归档记录为只读，支持分页、按自然日/交易日/节假日筛选和详情查看。状态为“有阻塞”时需要填写阻塞原因，并会自动展示在跑批计划下方的阻塞看板；每次阻塞会记录开始、关闭和持续时间，可在看板或归档详情中查看。未归档计划支持维护“计划执行时间”；点击“开始”会通知批量开始执行并 `@所有人`，点击“完成”会通知已完成批量和下一批量。运行态数据会写入 SQLite 数据库 `data/qwbot.sqlite3`，首次启动会从 `data/sample_status.json` 自动迁移；机器人预览、立即发送和定时发送都会读取未归档的跑批计划。
 
 如果需要给同事访问，可指定监听地址：
 
@@ -69,14 +69,18 @@ python -m qwbot.cli web --host 0.0.0.0 --port 5000
 定时任务每天 09:00 和 18:00 发送组内重点工作通知；周末或当天标记为自然节假日 `Y` 时自动跳过。
 
 ```dotenv
+WECOM_WEBHOOK_URL_PROD=https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=your-prod-key
+WECOM_WEBHOOK_URL_TEST=https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=your-test-key
+WECOM_WEBHOOK_TARGET=test
 PROGRESS_DOC_URL=https://doc.weixin.qq.com/sheet/your-progress-doc
 BATCH_REGISTER_DOC_URL=https://doc.weixin.qq.com/sheet/your-batch-register-doc
-ENVIRONMENT_STATS_DOC_URL=https://doc.weixin.qq.com/sheet/your-environment-stats-doc
+CASE_ASSIGNMENT_DOC_URL=https://doc.weixin.qq.com/sheet/your-case-assignment-doc
 AGENDA_DOC_URL=https://doc.weixin.qq.com/sheet/your-agenda-doc
 FRONTEND_URL=http://127.0.0.1:5000
+QWBOT_DB_PATH=data/qwbot.sqlite3
 ```
 
-定时通知会包含问题登记、环境统计、跑批计划、事项安排四个链接，以及交易日信息和前端登记链接。
+定时通知会包含进度统计、用例分工、跑批计划、加班申请四个链接，以及交易日信息和前端登记链接。
 
 ## 在线文档数据格式
 
@@ -127,11 +131,11 @@ BATCH_LONG_CYCLE_RANGE=A1:Z1000
 
 还需要补充“长周期跑批日历”的工作表 ID。可以切换到该标签页后复制 URL 里的 `tab=` 参数。
 
-在这些信息补齐前，机器人会使用 `data/sample_status.json`，保证推送流程可以先跑通。
+在这些信息补齐前，机器人会在首次启动时把 `data/sample_status.json` 迁移到 `data/qwbot.sqlite3`，保证推送流程可以先跑通。
 
 ## Linux Docker 部署
 
-服务器部署时不要把 `data/sample_status.json` 打进镜像，也不要提交到 Git。该文件由你手动上传到服务器项目目录的 `data/sample_status.json`，容器通过 volume 挂载读取。
+服务器部署时不要把 `data/sample_status.json` 或 `data/qwbot.sqlite3` 打进镜像，也不要提交到 Git。旧 JSON 可由你手动上传到服务器项目目录的 `data/sample_status.json`，容器首次启动会迁移到同一 volume 下的 SQLite 数据库。
 
 1. 在服务器拉取代码后初始化目录和配置：
 
@@ -142,9 +146,12 @@ sh scripts/bootstrap-server.sh
 1. 编辑服务器上的 `.env`，至少补充：
 
 ```dotenv
-WECOM_WEBHOOK_URL=https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=your-key
+WECOM_WEBHOOK_URL_PROD=https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=your-prod-key
+WECOM_WEBHOOK_URL_TEST=https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=your-test-key
+WECOM_WEBHOOK_TARGET=prod
 FRONTEND_URL=http://your-server-ip:5000
 QWBOT_PORT=5000
+QWBOT_DB_PATH=data/qwbot.sqlite3
 ```
 
 1. 手动上传数据文件：

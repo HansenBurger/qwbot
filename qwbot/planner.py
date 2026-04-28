@@ -6,7 +6,7 @@ from typing import Any
 
 def active_batch_items(items: list[dict[str, str]]) -> list[tuple[int, dict[str, str]]]:
     indexed_items = [
-        (index, item)
+        (_item_id(item, index), item)
         for index, item in enumerate(items)
         if not is_archived(item) and not is_completed_from_previous_day(item)
     ]
@@ -66,9 +66,9 @@ def is_completed_from_previous_day(item: dict[str, str]) -> bool:
 def sort_key(item: dict[str, str]) -> tuple[str, str, str, str]:
     return (
         item.get("natural_date") or item.get("date") or "9999-12-31",
-        item.get("batch_start_time") or "99:99",
         item.get("current_accounting_date") or "9999-12-31",
         item.get("next_accounting_date") or "9999-12-31",
+        item.get("batch_start_time") or "99:99",
     )
 
 
@@ -97,3 +97,10 @@ def batch_detail_lines(item: dict[str, str] | None) -> list[str]:
 
 def normalize_bool(value: Any) -> bool:
     return str(value).lower() in {"true", "1", "yes", "y"}
+
+
+def _item_id(item: dict[str, str], fallback: int) -> int:
+    try:
+        return int(item.get("id") or fallback)
+    except (TypeError, ValueError):
+        return fallback

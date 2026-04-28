@@ -16,12 +16,12 @@ def build_scheduled_reminder(settings: Settings, next_batch: dict[str, str] | No
         [
             f"## {title_date} 组内重点工作",
             (
-                f"问题登记：{_format_doc_link(settings.progress_doc_url)}　"
-                f"环境统计：{_format_doc_link(settings.environment_stats_doc_url)}"
+                f"进度统计：{_format_doc_link(settings.progress_doc_url)}　"
+                f"用例分工：{_format_doc_link(settings.case_assignment_doc_url)}"
             ),
             (
                 f"跑批计划：{_format_doc_link(settings.batch_register_doc_url)}　"
-                f"事项安排：{_format_doc_link(settings.agenda_doc_url)}"
+                f"加班申请：{_format_doc_link(settings.agenda_doc_url)}"
             ),
             "",
             f"当前交易日：<font color=\"info\">{_batch_current_date(next_batch)}</font>",

@@ -11,11 +11,11 @@
         <input type="date" name="natural_date" value="{{ item.natural_date }}" required>
       </label>
       <label>
-        <span>系统当前会计日期</span>
+        <span>跑批前交易日期</span>
         <input type="date" name="current_accounting_date" value="{{ item.current_accounting_date }}">
       </label>
       <label>
-        <span>跑批后会计日期</span>
+        <span>跑批后交易日期</span>
         <input type="date" name="next_accounting_date" value="{{ item.next_accounting_date }}">
       </label>
       <label>
@@ -47,7 +47,7 @@
         </select>
       </label>
       <label>
-        <span>跑批启动时间</span>
+        <span>计划执行时间</span>
         <input type="time" name="batch_start_time" value="{{ item.batch_start_time }}">
       </label>
       <label class="wide block-reason-field">

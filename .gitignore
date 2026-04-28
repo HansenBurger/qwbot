@@ -12,6 +12,8 @@ dist/
 build/
 *.egg-info/
 data/*.json
+data/*.sqlite3
+data/*.db
 !data/.gitkeep
 tmp/
 *.log

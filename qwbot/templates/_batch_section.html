@@ -23,42 +23,83 @@
     </div>
   </div>
 
+  {% if view == "archived" %}
+    <form class="filter-bar" method="get" action="{{ url_for('index') }}">
+      <input type="hidden" name="view" value="archived">
+      <label>
+        <span>自然日</span>
+        <input type="date" name="natural_date" value="{{ archive_filters.natural_date }}">
+      </label>
+      <label>
+        <span>交易日</span>
+        <input type="date" name="accounting_date" value="{{ archive_filters.accounting_date }}">
+      </label>
+      <label>
+        <span>节假日</span>
+        <select name="holiday_flag">
+          <option value="">全部</option>
+          {% for option in ["N", "Y"] %}
+            <option value="{{ option }}" {% if archive_filters.holiday_flag == option %}selected{% endif %}>{{ option }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <button type="submit">筛选</button>
+      <a class="ghost-button" href="{{ url_for('index', view='archived') }}">重置</a>
+    </form>
+  {% endif %}
+
   <div class="table-wrap">
     {% if batch_plan %}
-      <table class="plan-table">
+      <table class="plan-table {% if view == 'archived' %}archive-table{% else %}active-table{% endif %}">
         <thead>
           <tr>
+            {% if view == "archived" %}
+              <th>序号</th>
+            {% endif %}
             <th>自然日历</th>
-            <th>系统当前会计日期</th>
-            <th>跑批后会计日期</th>
+            <th>跑批前交易日期</th>
+            <th>跑批后交易日期</th>
             <th>节假日</th>
-            <th>启动时间</th>
+            <th>{% if view == "archived" %}实际完成时间{% else %}计划执行时间{% endif %}</th>
             <th>说明</th>
             <th>提出人</th>
             <th>状态</th>
-            {% if view != "archived" %}
-              <th class="actions-column">操作</th>
-            {% endif %}
+            <th>执行时长</th>
+            <th>阻塞时长</th>
+            <th class="actions-column">操作</th>
           </tr>
         </thead>
         <tbody>
           {% for entry in batch_plan %}
             {% set item = entry.item %}
             <tr>
+              {% if view == "archived" %}
+                <td>{{ pagination.start_index + loop.index }}</td>
+              {% endif %}
               <td>{{ item.natural_date or "-" }}</td>
               <td>{{ item.current_accounting_date or "-" }}</td>
               <td>{{ item.next_accounting_date or "-" }}</td>
               <td>
                 <span class="pill holiday-{{ item.holiday_flag or 'N' }}">{{ item.holiday_flag or "N" }}</span>
               </td>
-              <td>{{ item.batch_start_time or "-" }}</td>
+              <td>
+                {% if view == "archived" %}
+                  {{ item.completed_time_display }}
+                {% else %}
+                  {{ item.batch_start_time or "-" }}
+                {% endif %}
+              </td>
               <td class="description-cell">{{ item.description or item.content or "-" }}</td>
               <td>{{ item.requester or item.owner or "-" }}</td>
               <td class="status-cell">
                 <span class="status status-{{ item.execution_status or item.status or '待执行' }}">{{ item.execution_status or item.status or "待执行" }}</span>
               </td>
-              {% if view != "archived" %}
-                <td class="row-actions">
+              <td>{{ item.execution_duration }}</td>
+              <td>{{ item.block_total_duration }}</td>
+              <td class="row-actions">
+                {% if view == "archived" %}
+                  <button type="button" class="link-button" data-open-modal="detail-plan-{{ entry.index }}">详情</button>
+                {% else %}
                   {% if entry.can_start %}
                     <form method="post" action="{{ url_for('start_item', index=entry.index) }}">
                       <button type="submit" class="link-button" data-confirm="确认通知批量开始执行？">开始</button>
@@ -72,15 +113,21 @@
                   {% if entry.is_sequence_blocked %}
                     <span class="blocked-inline">需先处理阻塞</span>
                   {% endif %}
-                  <button type="button" class="link-button" data-open-modal="edit-plan-{{ entry.index }}">修改</button>
-                  <form method="post" action="{{ url_for('remove_item', collection='batch_plan', index=entry.index) }}">
-                    <button type="submit" class="link-button danger-text" data-confirm="确认删除这条跑批计划？">删除</button>
-                  </form>
-                  <form method="post" action="{{ url_for('archive_item', index=entry.index) }}">
-                    <button type="submit" class="link-button" data-confirm="确认归档这条跑批计划？">归档</button>
-                  </form>
-                </td>
-              {% endif %}
+                  {% if entry.can_edit %}
+                    <button type="button" class="link-button" data-open-modal="edit-plan-{{ entry.index }}">修改</button>
+                  {% endif %}
+                  {% if entry.can_delete %}
+                    <form method="post" action="{{ url_for('remove_item', collection='batch_plan', index=entry.index) }}">
+                      <button type="submit" class="link-button danger-text" data-confirm="确认删除这条跑批计划？">删除</button>
+                    </form>
+                  {% endif %}
+                  {% if entry.can_archive %}
+                    <form method="post" action="{{ url_for('archive_item', index=entry.index) }}">
+                      <button type="submit" class="link-button" data-confirm="确认归档这条跑批计划？">归档</button>
+                    </form>
+                  {% endif %}
+                {% endif %}
+              </td>
             </tr>
           {% endfor %}
         </tbody>
@@ -95,44 +142,61 @@
       </p>
     {% endif %}
   </div>
+
+  {% if view == "archived" and pagination.total_pages > 1 %}
+    <nav class="pagination" aria-label="归档分页">
+      {% if pagination.has_prev %}
+        <a class="ghost-button" href="{{ url_for('index', view='archived', page=pagination.prev_page, natural_date=archive_filters.natural_date, accounting_date=archive_filters.accounting_date, holiday_flag=archive_filters.holiday_flag) }}">上一页</a>
+      {% endif %}
+      <span>第 {{ pagination.page }} / {{ pagination.total_pages }} 页，共 {{ pagination.total }} 条</span>
+      {% if pagination.has_next %}
+        <a class="ghost-button" href="{{ url_for('index', view='archived', page=pagination.next_page, natural_date=archive_filters.natural_date, accounting_date=archive_filters.accounting_date, holiday_flag=archive_filters.holiday_flag) }}">下一页</a>
+      {% endif %}
+    </nav>
+  {% endif %}
 </article>
 
 <section class="board">
   <div class="board-header">
     <div>
       <h2>阻塞看板</h2>
-      <p>状态为“有阻塞”的跑批计划会自动出现在这里，便于集中跟踪原因。</p>
+      <p>当前批量执行中保留展示阻塞记录；批量完成后自动移出看板。</p>
     </div>
-    <span>{{ blocked_plan | length }} 项</span>
+    <span>{{ blocked_plan | length }} 条</span>
   </div>
 
   {% if blocked_plan %}
-    <div class="blocked-grid">
-      {% for entry in blocked_plan %}
-        {% set item = entry.item %}
-        <article class="blocked-card">
-          <div class="blocked-card-title">
-            <span class="status status-有阻塞">有阻塞</span>
-            <strong>{{ item.natural_date or "-" }}</strong>
-          </div>
-          <p class="blocked-description">{{ item.description or item.content or "-" }}</p>
-          <dl>
-            <div>
-              <dt>会计日期</dt>
-              <dd>{{ item.current_accounting_date or "-" }} -> {{ item.next_accounting_date or "-" }}</dd>
-            </div>
-            <div>
-              <dt>提出人</dt>
-              <dd>{{ item.requester or item.owner or "-" }}</dd>
-            </div>
-            <div>
-              <dt>阻塞原因</dt>
-              <dd>{{ item.block_reason or "未填写" }}</dd>
-            </div>
-          </dl>
-          <button type="button" class="link-button" data-open-modal="edit-plan-{{ entry.index }}">修改</button>
-        </article>
-      {% endfor %}
+    <div class="blocked-table-wrap">
+      <table class="blocked-table">
+        <thead>
+          <tr>
+            <th>登记时间</th>
+            <th>阻塞原因</th>
+            <th>阻塞时长</th>
+            <th>状态</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for entry in blocked_plan %}
+            <tr class="{{ entry.row_class }}">
+              <td>{{ entry.registered_at }}</td>
+              <td class="blocked-reason-cell">{{ entry.reason }}</td>
+              <td>{{ entry.duration }}</td>
+              <td><span class="block-state">{{ entry.status_label }}</span></td>
+              <td>
+                {% if entry.is_open %}
+                  <form method="post" action="{{ url_for('close_block', index=entry.batch_index) }}">
+                    <button type="submit" class="link-button" data-confirm="确认关闭该阻塞并恢复为进行中？">关闭</button>
+                  </form>
+                {% else %}
+                  <span class="muted-text">-</span>
+                {% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
     </div>
   {% else %}
     <p class="empty board-empty">暂无阻塞事项。</p>
@@ -162,5 +226,47 @@
     {% set form_action = url_for('edit_item', collection='batch_plan', index=entry.index) %}
     {% set item = entry.item %}
     {% include "_plan_modal.html" %}
+  {% endfor %}
+{% else %}
+  {% for entry in batch_plan %}
+    {% set item = entry.item %}
+    <dialog class="modal" id="detail-plan-{{ entry.index }}">
+      <div class="modal-card">
+        <div class="modal-header">
+          <h3>归档详情</h3>
+          <button type="button" class="icon-button" data-close-modal="detail-plan-{{ entry.index }}" aria-label="关闭">×</button>
+        </div>
+        <div class="detail-panel">
+          <dl>
+            <div><dt>自然日历</dt><dd>{{ item.natural_date or "-" }}</dd></div>
+            <div><dt>跑批前交易日期</dt><dd>{{ item.current_accounting_date or "-" }}</dd></div>
+            <div><dt>跑批后交易日期</dt><dd>{{ item.next_accounting_date or "-" }}</dd></div>
+            <div><dt>说明</dt><dd>{{ item.description or item.content or "-" }}</dd></div>
+            <div><dt>提出人</dt><dd>{{ item.requester or item.owner or "-" }}</dd></div>
+            <div><dt>执行开始</dt><dd>{{ item.started_at or item.started_on or "-" }}</dd></div>
+            <div><dt>执行完成</dt><dd>{{ item.completed_at or item.completed_on or "-" }}</dd></div>
+            <div><dt>执行时长</dt><dd>{{ item.execution_duration }}</dd></div>
+            <div><dt>阻塞总时长</dt><dd>{{ item.block_total_duration }}</dd></div>
+            <div><dt>归档日期</dt><dd>{{ item.archived_on or "-" }}</dd></div>
+          </dl>
+          <h4>阻塞记录</h4>
+          {% if item.block_events %}
+            <ul class="event-list">
+              {% for event in item.block_events %}
+                <li>
+                  <strong>{{ event.reason or "未填写原因" }}</strong>
+                  <span>{{ event.started_at or "-" }} 至 {{ event.ended_at or "未关闭" }}</span>
+                </li>
+              {% endfor %}
+            </ul>
+          {% else %}
+            <p class="empty inline-empty">无阻塞记录。</p>
+          {% endif %}
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="secondary-button" data-close-modal="detail-plan-{{ entry.index }}">关闭</button>
+        </div>
+      </div>
+    </dialog>
   {% endfor %}
 {% endif %}
