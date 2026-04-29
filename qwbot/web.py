@@ -1,27 +1,42 @@
 from __future__ import annotations
 
-from datetime import datetime
+import json
+from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from flask import Flask, redirect, render_template, request, url_for
 
 from qwbot.config import Settings
-from qwbot.message import build_batch_complete_notice, build_batch_start_notice
-from qwbot.planner import is_completed, next_batch_after, sort_key
+from qwbot.message import build_batch_complete_notice, build_batch_start_notice, build_custom_notification
+from qwbot.planner import is_business_day, is_completed, next_batch_after, sort_key
 from qwbot.store import (
     add_block_event,
     add_item,
+    add_scheduler_force_date,
+    add_scheduler_skip_date,
+    add_scheduler_time,
     close_open_block,
+    delete_scheduler_force_date,
+    delete_scheduler_skip_date,
+    delete_scheduler_time,
     delete_item,
     get_item,
     has_open_block,
     init_store,
     load_status_file,
+    set_notification_date_override,
+    update_scheduler_time,
     update_item,
     update_open_block_reason,
 )
 from qwbot.wecom import WeComWebhookClient
+
+DATE_RULE_LABELS = {
+    "all": "所有自然日",
+    "business_day": "跳过周末和节假日",
+    "holiday_only": "仅跳过节假日",
+}
 
 
 def create_app(settings: Settings) -> Flask:
@@ -35,6 +50,13 @@ def create_app(settings: Settings) -> Flask:
         _archive_completed_from_previous_days(status_file, payload, settings.timezone)
         view = request.args.get("view", "active")
         filters = _archive_filters_from_request()
+        if view == "archived" and not _has_archive_filter_args():
+            filters = _default_archive_filters(payload["batch_plan"], settings.timezone)
+        all_archived_entries = _batch_items_for_view(
+            payload["batch_plan"],
+            "archived",
+            timezone=settings.timezone,
+        )
         archived_entries = _batch_items_for_view(
             payload["batch_plan"],
             "archived",
@@ -56,12 +78,40 @@ def create_app(settings: Settings) -> Flask:
             batch_plan=pagination["items"],
             blocked_plan=_blocked_items(payload["batch_plan"], settings.timezone),
             active_count=len(active_entries),
-            archived_count=len(archived_entries),
+            archived_count=len(all_archived_entries),
             archive_filters=filters,
             pagination=pagination,
             today=_today_iso(settings.timezone),
             view=view,
             status_file=_display_path(status_file),
+        )
+
+    @app.get("/notifications")
+    def notification_page():
+        payload = load_status_file(status_file)
+        notification_tasks = _notification_tasks_for_view(
+            payload["notification_tasks"],
+            payload["batch_plan"],
+            settings.timezone,
+        )
+        notification_pagination = _paginate_entries(
+            notification_tasks,
+            page=_int_arg("notification_page", 1),
+            per_page=5,
+        )
+        return render_template(
+            "notifications.html",
+            scheduler_times=payload["scheduler_times"],
+            notification_tasks=notification_pagination["items"],
+            notification_pagination=notification_pagination,
+            reminder_dates=_reminder_date_entries(
+                payload["batch_plan"],
+                payload["scheduler_skip_dates"],
+                payload["scheduler_force_dates"],
+                settings.timezone,
+            ),
+            current_hour=_current_hour(settings.timezone),
+            current_time=_current_time(settings.timezone),
         )
 
     @app.post("/items/<collection>")
@@ -155,6 +205,79 @@ def create_app(settings: Settings) -> Flask:
         update_item(status_file, "batch_plan", index, item)
         return redirect(url_for("index"))
 
+    @app.post("/notifications")
+    def create_notification():
+        add_item(status_file, "notification_tasks", _notification_from_form())
+        return redirect(url_for("notification_page"))
+
+    @app.post("/notifications/<int:index>")
+    def edit_notification(index: int):
+        update_item(status_file, "notification_tasks", index, _notification_from_form())
+        return redirect(url_for("notification_page"))
+
+    @app.post("/notifications/<int:index>/delete")
+    def remove_notification(index: int):
+        delete_item(status_file, "notification_tasks", index)
+        return redirect(url_for("notification_page"))
+
+    @app.post("/notifications/<int:index>/date-rule")
+    def edit_notification_date_rule(index: int):
+        task = get_item(status_file, "notification_tasks", index)
+        task["date_rule"] = _date_rule_from_form()
+        update_item(status_file, "notification_tasks", index, task)
+        return redirect(url_for("notification_page"))
+
+    @app.post("/notifications/<int:index>/send-now")
+    def send_notification_now(index: int):
+        task = get_item(status_file, "notification_tasks", index)
+        WeComWebhookClient(settings.webhook_url).send_markdown(build_custom_notification(task))
+        return redirect(url_for("notification_page"))
+
+    @app.post("/notifications/<int:index>/skip-date")
+    def skip_notification_date(index: int):
+        set_notification_date_override(status_file, index, request.form.get("target_date", ""), "skip")
+        return redirect(url_for("notification_page"))
+
+    @app.post("/notifications/<int:index>/force-date")
+    def force_notification_date(index: int):
+        set_notification_date_override(status_file, index, request.form.get("target_date", ""), "force")
+        return redirect(url_for("notification_page"))
+
+    @app.post("/scheduler-times/<reminder_id>")
+    def edit_scheduler_time(reminder_id: str):
+        update_scheduler_time(status_file, reminder_id, _send_time_from_form())
+        return redirect(url_for("notification_page"))
+
+    @app.post("/scheduler-times")
+    def create_scheduler_time():
+        add_scheduler_time(status_file, _send_time_from_form())
+        return redirect(url_for("notification_page"))
+
+    @app.post("/scheduler-times/<reminder_id>/delete")
+    def remove_scheduler_time(reminder_id: str):
+        delete_scheduler_time(status_file, reminder_id)
+        return redirect(url_for("notification_page"))
+
+    @app.post("/scheduler-skip-dates")
+    def create_scheduler_skip_date():
+        add_scheduler_skip_date(status_file, request.form.get("skip_date", ""))
+        return redirect(url_for("notification_page"))
+
+    @app.post("/scheduler-skip-dates/delete")
+    def remove_scheduler_skip_date():
+        delete_scheduler_skip_date(status_file, request.form.get("skip_date", ""))
+        return redirect(url_for("notification_page"))
+
+    @app.post("/scheduler-force-dates")
+    def create_scheduler_force_date():
+        add_scheduler_force_date(status_file, request.form.get("force_date", ""))
+        return redirect(url_for("notification_page"))
+
+    @app.post("/scheduler-force-dates/delete")
+    def remove_scheduler_force_date():
+        delete_scheduler_force_date(status_file, request.form.get("force_date", ""))
+        return redirect(url_for("notification_page"))
+
     return app
 
 
@@ -191,6 +314,139 @@ def _archive_filters_from_request() -> dict[str, str]:
         "accounting_date": request.args.get("accounting_date", "").strip(),
         "holiday_flag": request.args.get("holiday_flag", "").strip(),
     }
+
+
+def _has_archive_filter_args() -> bool:
+    return any(name in request.args for name in ("natural_date", "accounting_date", "holiday_flag"))
+
+
+def _default_archive_filters(
+    items: list[dict[str, object]],
+    timezone: str = "Asia/Shanghai",
+) -> dict[str, str]:
+    archived_dates = sorted(
+        {
+            str(item.get("natural_date") or item.get("date") or "")
+            for item in items
+            if _is_archived(item) and (item.get("natural_date") or item.get("date"))
+        }
+    )
+    if not archived_dates:
+        return {"natural_date": "", "accounting_date": "", "holiday_flag": ""}
+
+    today = _today_iso(timezone)
+    natural_date = today if today in archived_dates else archived_dates[-1]
+    return {"natural_date": natural_date, "accounting_date": "", "holiday_flag": ""}
+
+
+def _notification_from_form() -> dict[str, str]:
+    return {
+        "title": request.form.get("title", ""),
+        "content": request.form.get("content", ""),
+        "doc_links": _doc_links_from_form(),
+        "send_time": _send_time_from_form(),
+        "at_all": "true" if request.form.get("at_all") == "true" else "",
+        "date_rule": _date_rule_from_form(),
+    }
+
+
+def _doc_links_from_form() -> list[dict[str, str]]:
+    labels = request.form.getlist("doc_label")
+    urls = request.form.getlist("doc_url")
+    return [
+        {"label": label.strip(), "url": url.strip()}
+        for label, url in zip(labels, urls)
+        if url.strip()
+    ]
+
+
+def _send_time_from_form() -> str:
+    send_time = request.form.get("send_time", "").strip()
+    parts = send_time.split(":")
+    if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+        hour = max(0, min(23, int(parts[0])))
+        minute = max(0, min(59, int(parts[1])))
+        return f"{hour:02d}:{minute:02d}"
+    return "00:00"
+
+
+def _current_hour(timezone: str) -> str:
+    return datetime.now(ZoneInfo(timezone)).strftime("%H")
+
+
+def _current_time(timezone: str) -> str:
+    return datetime.now(ZoneInfo(timezone)).strftime("%H:%M")
+
+
+def _doc_links_json(doc_links: object) -> str:
+    if not isinstance(doc_links, list):
+        return "[]"
+    return json.dumps(doc_links, ensure_ascii=False)
+
+
+def _notification_tasks_for_view(
+    tasks: list[dict[str, object]],
+    batch_plan: list[dict[str, str]] | None = None,
+    timezone: str | None = None,
+) -> list[dict[str, object]]:
+    for task in tasks:
+        date_rule = _normalize_date_rule(str(task.get("date_rule") or ""))
+        task["date_rule"] = date_rule
+        task["date_rule_label"] = DATE_RULE_LABELS[date_rule]
+    return sorted(tasks, key=_notification_sort_key)
+
+
+def _notification_sort_key(task: dict[str, object]) -> tuple[str, int]:
+    try:
+        task_id = int(task.get("id") or 0)
+    except (TypeError, ValueError):
+        task_id = 0
+    return (str(task.get("send_time") or "99:99"), task_id)
+
+
+def _reminder_date_entries(
+    batch_plan: list[dict[str, str]],
+    skip_dates: list[dict[str, str]],
+    force_dates: list[dict[str, str]],
+    timezone: str,
+    days: int = 10,
+) -> list[dict[str, object]]:
+    today = datetime.now(ZoneInfo(timezone)).date()
+    skipped = {item["date"] for item in skip_dates}
+    forced = {item["date"] for item in force_dates}
+    entries = []
+    for offset in range(days):
+        current = today + timedelta(days=offset)
+        current_text = current.isoformat()
+        default_remind = is_business_day(batch_plan, current)
+        is_skipped = current_text in skipped
+        is_forced = current_text in forced
+        will_remind = is_forced or (default_remind and not is_skipped)
+        entries.append(
+            {
+                "date": current_text,
+                "day": current.strftime("%m-%d"),
+                "weekday": _weekday_label(current.weekday()),
+                "is_today": offset == 0,
+                "is_skipped": not will_remind,
+                "is_forced": is_forced,
+                "default_remind": default_remind,
+                "will_remind": will_remind,
+            }
+        )
+    return entries
+
+
+def _date_rule_from_form() -> str:
+    return _normalize_date_rule(request.form.get("date_rule", ""))
+
+
+def _normalize_date_rule(value: str) -> str:
+    return value if value in DATE_RULE_LABELS else "business_day"
+
+
+def _weekday_label(weekday: int) -> str:
+    return ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][weekday]
 
 
 def _int_arg(name: str, default: int) -> int:

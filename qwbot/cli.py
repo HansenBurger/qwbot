@@ -6,11 +6,10 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler
-from apscheduler.triggers.cron import CronTrigger
 
 from qwbot.config import load_settings
-from qwbot.message import build_scheduled_reminder
-from qwbot.planner import active_batch_items, is_business_day, is_completed
+from qwbot.message import build_custom_notification, build_scheduled_reminder
+from qwbot.planner import active_batch_items, is_business_day, is_completed, is_holiday
 from qwbot.store import init_store, load_status_file
 from qwbot.wecom import WeComWebhookClient
 
@@ -59,7 +58,7 @@ def main() -> None:
         return
 
     if args.command == "run-scheduled-once":
-        _send_if_business_day(settings)
+        _send_due_notifications(settings, set())
         return
 
     _schedule(settings)
@@ -86,7 +85,13 @@ def _send_if_business_day(settings) -> None:
     init_store(settings.db_path, settings.local_status_file)
     payload = load_status_file(settings.db_path)
     today = datetime.now(ZoneInfo(settings.timezone)).date()
-    if not is_business_day(payload["batch_plan"], today):
+    today_text = today.isoformat()
+    skipped_dates = {item["date"] for item in payload["scheduler_skip_dates"]}
+    forced_dates = {item["date"] for item in payload["scheduler_force_dates"]}
+    if today_text in skipped_dates:
+        print("Scheduled reminder skipped: date configured to skip.")
+        return
+    if today_text not in forced_dates and not is_business_day(payload["batch_plan"], today):
         print("Scheduled reminder skipped: non-business day.")
         return
     _send(settings)
@@ -94,29 +99,18 @@ def _send_if_business_day(settings) -> None:
 
 def _schedule(settings) -> None:
     scheduler = BackgroundScheduler(timezone=settings.timezone)
+    sent_keys: set[str] = set()
     scheduler.add_job(
-        lambda: _send_if_business_day(settings),
-        CronTrigger(
-            hour=9,
-            minute=0,
-            timezone=settings.timezone,
-        ),
-        id="morning-reminder",
-        replace_existing=True,
-    )
-    scheduler.add_job(
-        lambda: _send_if_business_day(settings),
-        CronTrigger(
-            hour=18,
-            minute=0,
-            timezone=settings.timezone,
-        ),
-        id="evening-reminder",
+        lambda: _send_due_notifications(settings, sent_keys),
+        "interval",
+        seconds=30,
+        next_run_time=datetime.now(ZoneInfo(settings.timezone)),
+        id="notification-dispatcher",
         replace_existing=True,
     )
     scheduler.start()
     print(
-        "Scheduler started. Scheduled reminders will run at 09:00 and 18:00 on business days."
+        "Scheduler started. Notification times are loaded from the SQLite database."
     )
 
     try:
@@ -125,6 +119,56 @@ def _schedule(settings) -> None:
     except (KeyboardInterrupt, SystemExit):
         scheduler.shutdown()
         print("Scheduler stopped.")
+
+
+def _send_due_notifications(settings, sent_keys: set[str]) -> None:
+    init_store(settings.db_path, settings.local_status_file)
+    payload = load_status_file(settings.db_path)
+    now = datetime.now(ZoneInfo(settings.timezone))
+    today_text = now.date().isoformat()
+    current_time = now.strftime("%H:%M")
+
+    # Keep only today's sent markers so long-running schedulers do not grow unbounded.
+    sent_keys.intersection_update({key for key in sent_keys if key.startswith(today_text)})
+    client = WeComWebhookClient(settings.webhook_url)
+
+    skipped_dates = {item["date"] for item in payload["scheduler_skip_dates"]}
+    forced_dates = {item["date"] for item in payload["scheduler_force_dates"]}
+    if today_text in skipped_dates:
+        print(f"Built-in reminder skipped: {today_text} is configured to skip.")
+    elif today_text not in forced_dates and not is_business_day(payload["batch_plan"], now.date()):
+        print(f"Built-in reminder skipped: {today_text} is non-business day.")
+    else:
+        for reminder in payload["scheduler_times"]:
+            if reminder.get("send_time") == current_time:
+                key = f"{today_text}:builtin:{reminder['id']}:{current_time}"
+                if key in sent_keys:
+                    continue
+                client.send_markdown(_build_scheduled_message(settings))
+                sent_keys.add(key)
+                print(f"Built-in reminder sent: {reminder['id']} {current_time}.")
+
+    for task in payload["notification_tasks"]:
+        if task.get("send_time") != current_time:
+            continue
+        if not _should_send_custom_notification(payload["batch_plan"], task, now.date()):
+            print(f"Custom notification skipped: {task.get('title') or task['id']} date rule.")
+            continue
+        key = f"{today_text}:custom:{task['id']}:{current_time}"
+        if key in sent_keys:
+            continue
+        client.send_markdown(build_custom_notification(task))
+        sent_keys.add(key)
+        print(f"Custom notification sent: {task.get('title') or task['id']} {current_time}.")
+
+
+def _should_send_custom_notification(batch_plan, task, today) -> bool:
+    date_rule = task.get("date_rule") or "business_day"
+    if date_rule == "all":
+        return True
+    if date_rule == "holiday_only":
+        return not is_holiday(batch_plan, today)
+    return is_business_day(batch_plan, today)
 
 
 if __name__ == "__main__":

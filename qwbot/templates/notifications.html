@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>消息通知维护</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <script defer src="{{ url_for('static', filename='app.js') }}"></script>
+  </head>
+  <body>
+    <main class="page">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">QWBot</p>
+          <h1>消息通知维护</h1>
+          <p>维护定时发送到企业微信群的通知任务，并调整固定工作提醒发送时间。</p>
+          <nav class="page-nav" aria-label="页面导航">
+            <a class="ghost-button" href="{{ url_for('index') }}">跑批计划</a>
+            <a class="ghost-button active" href="{{ url_for('notification_page') }}">消息通知</a>
+          </nav>
+        </div>
+        <div class="clock-card" aria-live="polite">
+          <span>当前日期与时间</span>
+          <strong data-clock-date>--</strong>
+          <time data-clock-time>--:--</time>
+        </div>
+      </header>
+
+      {% include "_notification_section.html" %}
+    </main>
+  </body>
+</html>

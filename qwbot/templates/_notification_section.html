@@ -1,0 +1,189 @@
+<section class="board notification-board">
+  <div class="board-header">
+    <div>
+      <h2>消息通知</h2>
+      <p>维护需要定时发送到群里的自定义通知；原有组内重点工作提醒仅允许修改发送时间。</p>
+    </div>
+  </div>
+
+  <div class="scheduler-panel">
+    <div class="scheduler-heading">
+      <div>
+        <h3>固定工作提醒</h3>
+        <p>内容由系统根据跑批计划生成，可维护多个发送时间点。</p>
+      </div>
+    </div>
+    <div class="reminder-date-panel">
+      <div class="reminder-date-toolbar">
+        <div>
+          <strong>提醒日期</strong>
+          <span>工作日默认提醒，周末和节假日默认不提醒；每个自然日都可手动覆盖。</span>
+        </div>
+        <form class="skip-date-form" method="post" action="{{ url_for('create_scheduler_skip_date') }}">
+          <input type="date" name="skip_date" required aria-label="选择跳过日期">
+          <button type="submit">跳过</button>
+          <button type="submit" class="secondary-button" formaction="{{ url_for('create_scheduler_force_date') }}" name="force_date" data-date-source="skip_date">生效</button>
+        </form>
+      </div>
+      <div class="reminder-date-strip" aria-label="固定提醒日期列表">
+        {% for entry in reminder_dates %}
+          <article class="reminder-date-card {% if entry.is_today %}today{% endif %} {% if entry.is_skipped %}skipped{% endif %}">
+            <div>
+              <strong>{{ entry.day }}</strong>
+              <span>{{ entry.weekday }}{% if entry.is_today %} · 今天{% endif %}</span>
+            </div>
+            {% if entry.is_skipped %}
+              <form method="post" action="{{ url_for('create_scheduler_force_date') }}">
+                <input type="hidden" name="force_date" value="{{ entry.date }}">
+                <button type="submit" class="mini-button secondary-mini">生效</button>
+              </form>
+            {% else %}
+              <form method="post" action="{{ url_for('create_scheduler_skip_date') }}">
+                <input type="hidden" name="skip_date" value="{{ entry.date }}">
+                <button type="submit" class="mini-button">跳过</button>
+              </form>
+            {% endif %}
+          </article>
+        {% endfor %}
+      </div>
+    </div>
+    <div class="scheduler-list">
+      {% if scheduler_times %}
+        {% for reminder in scheduler_times %}
+          <div class="scheduler-row">
+            <div class="scheduler-row-title">
+              <span class="scheduler-index">{{ loop.index }}</span>
+              <div>
+                <strong>{{ reminder.send_time }}</strong>
+                <span>组内重点工作提醒</span>
+              </div>
+            </div>
+            <form class="scheduler-edit-form" method="post" action="{{ url_for('edit_scheduler_time', reminder_id=reminder.id) }}">
+              <label>
+                <span>发送时间</span>
+                <input type="time" name="send_time" value="{{ reminder.send_time }}" required>
+              </label>
+              <div class="scheduler-actions">
+                <button type="submit">保存</button>
+              </div>
+            </form>
+            <form class="scheduler-delete-form" method="post" action="{{ url_for('remove_scheduler_time', reminder_id=reminder.id) }}">
+              <button type="submit" class="danger-button" data-confirm="确认删除这个固定提醒时间？">删除</button>
+            </form>
+          </div>
+        {% endfor %}
+      {% else %}
+        <p class="empty inline-empty">暂无固定提醒时间，请点击“新增时间”添加。</p>
+      {% endif %}
+      <form class="scheduler-add-row" method="post" action="{{ url_for('create_scheduler_time') }}">
+        <input type="hidden" name="send_time" value="{{ current_hour }}:00">
+        <button type="submit" aria-label="新增固定工作提醒时间">
+          <span>+</span>
+          新增时间
+        </button>
+      </form>
+    </div>
+  </div>
+
+  <div class="custom-notification-panel">
+    <div class="subsection-heading">
+      <div>
+        <h3>自定义通知</h3>
+        <p>维护需要按固定时间发送到群里的业务提醒。</p>
+      </div>
+    </div>
+    <div class="notification-list">
+      {% if notification_tasks %}
+        {% for task in notification_tasks %}
+          <article class="notification-item">
+            <div class="notification-card-header">
+              <div>
+                <div class="notification-title">
+                  <strong>{{ task.title }}</strong>
+                  <span>{{ task.send_time }}</span>
+                  {% if task.at_all == "true" %}
+                    <span class="pill"> @所有人 </span>
+                  {% endif %}
+                </div>
+                <p>{{ task.content }}</p>
+                {% if task.doc_links %}
+                  <span class="doc-count">{{ task.doc_links | length }} 个文档链接</span>
+                {% endif %}
+              </div>
+              <div class="notification-actions">
+                <form method="post" action="{{ url_for('send_notification_now', index=task.id) }}">
+                  <button type="submit" class="link-button" data-confirm="确认立即发送这条消息通知？">立即发送</button>
+                </form>
+                <button type="button" class="link-button" data-open-modal="edit-notification-{{ task.id }}">修改</button>
+                <form method="post" action="{{ url_for('remove_notification', index=task.id) }}">
+                  <button type="submit" class="link-button danger-text" data-confirm="确认删除这条消息通知？">删除</button>
+                </form>
+              </div>
+            </div>
+            <div class="date-rule-panel" aria-label="{{ task.title }} 日期规则">
+              <form method="post" action="{{ url_for('edit_notification_date_rule', index=task.id) }}">
+                <span class="date-rule-label">发送范围</span>
+                <button
+                  type="submit"
+                  name="date_rule"
+                  value="all"
+                  class="date-rule-button {% if task.date_rule == 'all' %}active{% endif %}"
+                >所有自然日</button>
+                <button
+                  type="submit"
+                  name="date_rule"
+                  value="business_day"
+                  class="date-rule-button {% if task.date_rule == 'business_day' %}active{% endif %}"
+                >跳过周末和节假日</button>
+                <button
+                  type="submit"
+                  name="date_rule"
+                  value="holiday_only"
+                  class="date-rule-button {% if task.date_rule == 'holiday_only' %}active{% endif %}"
+                >仅跳过节假日</button>
+              </form>
+            </div>
+          </article>
+        {% endfor %}
+      {% else %}
+        <p class="empty inline-empty">暂无自定义消息通知，请点击“新增通知”添加。</p>
+      {% endif %}
+      <button type="button" class="notification-add-row" data-open-modal="create-notification">
+        <span>+</span>
+        新增通知
+      </button>
+      {% if notification_pagination.total_pages > 1 %}
+        <nav class="pagination compact-pagination" aria-label="自定义通知分页">
+          {% if notification_pagination.has_prev %}
+            <a class="ghost-button" href="{{ url_for('notification_page', notification_page=notification_pagination.prev_page) }}">上一页</a>
+          {% endif %}
+          <span>第 {{ notification_pagination.page }} / {{ notification_pagination.total_pages }} 页，共 {{ notification_pagination.total }} 条</span>
+          {% if notification_pagination.has_next %}
+            <a class="ghost-button" href="{{ url_for('notification_page', notification_page=notification_pagination.next_page) }}">下一页</a>
+          {% endif %}
+        </nav>
+      {% endif %}
+    </div>
+  </div>
+</section>
+
+{% set modal_id = "create-notification" %}
+{% set modal_title = "新增消息通知" %}
+{% set form_action = url_for('create_notification') %}
+{% set task = {
+  "title": "",
+  "content": "",
+  "doc_url": "",
+  "doc_links": [],
+  "send_time": current_time,
+  "at_all": "",
+  "date_rule": "business_day"
+} %}
+{% include "_notification_modal.html" %}
+
+{% for task in notification_tasks %}
+  {% set modal_id = "edit-notification-" ~ task.id %}
+  {% set modal_title = "修改消息通知" %}
+  {% set form_action = url_for('edit_notification', index=task.id) %}
+  {% include "_notification_modal.html" %}
+{% endfor %}

@@ -1,0 +1,65 @@
+<dialog class="modal" id="{{ modal_id }}">
+  <form class="modal-card" method="post" action="{{ form_action }}" data-notification-form>
+    <input type="hidden" name="date_rule" value="{{ task.date_rule or 'business_day' }}">
+    <div class="modal-header">
+      <h3>{{ modal_title }}</h3>
+      <button type="button" class="icon-button" data-close-modal="{{ modal_id }}" aria-label="关闭">×</button>
+    </div>
+
+    <div class="modal-grid">
+      <label>
+        <span>任务名称</span>
+        <input name="title" value="{{ task.title }}" placeholder="如：提醒更新进度" required>
+      </label>
+      <label>
+        <span>发送时间</span>
+        <input type="time" name="send_time" value="{{ task.send_time }}" required>
+      </label>
+      <label class="wide">
+        <span>消息内容</span>
+        <textarea name="content" rows="5" placeholder="填写需要发送到群里的通知内容" required>{{ task.content }}</textarea>
+      </label>
+      <div class="wide doc-link-editor" data-doc-link-editor>
+        <div class="field-heading">
+          <span>在线文档链接</span>
+        </div>
+        <div class="doc-link-list" data-doc-link-list>
+          {% set doc_links = task.doc_links or [] %}
+          {% if doc_links %}
+            {% for link in doc_links %}
+              <div class="doc-link-row">
+                <input name="doc_label" value="{{ link.label }}" placeholder="描述，如：进度统计">
+                <input type="url" name="doc_url" value="{{ link.url }}" placeholder="https://doc.weixin.qq.com/...">
+                <button type="button" class="danger-button compact-button" data-remove-doc-link>删除</button>
+              </div>
+            {% endfor %}
+          {% else %}
+            <div class="doc-link-row">
+              <input name="doc_label" placeholder="描述，如：进度统计">
+              <input type="url" name="doc_url" placeholder="https://doc.weixin.qq.com/...">
+              <button type="button" class="danger-button compact-button" data-remove-doc-link>删除</button>
+            </div>
+          {% endif %}
+        </div>
+        <button type="button" class="doc-link-add-row" data-add-doc-link>
+          <span>+</span>
+          新增文档
+        </button>
+      </div>
+      <label class="checkbox-label wide">
+        <input type="checkbox" name="at_all" value="true" {% if task.at_all == "true" %}checked{% endif %}>
+        <span>发送时 @所有人</span>
+      </label>
+      <div class="notification-preview wide" data-notification-preview hidden>
+        <strong>消息预览</strong>
+        <pre data-notification-preview-content></pre>
+      </div>
+    </div>
+
+    <div class="modal-actions">
+      <button type="button" class="secondary-button" data-close-modal="{{ modal_id }}">取消</button>
+      <button type="button" class="secondary-button" data-preview-notification>预览</button>
+      <button type="submit">保存</button>
+    </div>
+  </form>
+</dialog>

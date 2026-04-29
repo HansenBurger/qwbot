@@ -74,29 +74,29 @@
             {% set item = entry.item %}
             <tr>
               {% if view == "archived" %}
-                <td>{{ pagination.start_index + loop.index }}</td>
+                <td data-label="序号">{{ pagination.start_index + loop.index }}</td>
               {% endif %}
-              <td>{{ item.natural_date or "-" }}</td>
-              <td>{{ item.current_accounting_date or "-" }}</td>
-              <td>{{ item.next_accounting_date or "-" }}</td>
-              <td>
+              <td data-label="自然日历">{{ item.natural_date or "-" }}</td>
+              <td data-label="跑批前交易日期">{{ item.current_accounting_date or "-" }}</td>
+              <td data-label="跑批后交易日期">{{ item.next_accounting_date or "-" }}</td>
+              <td data-label="节假日">
                 <span class="pill holiday-{{ item.holiday_flag or 'N' }}">{{ item.holiday_flag or "N" }}</span>
               </td>
-              <td>
+              <td data-label="{% if view == 'archived' %}实际完成时间{% else %}计划执行时间{% endif %}">
                 {% if view == "archived" %}
                   {{ item.completed_time_display }}
                 {% else %}
                   {{ item.batch_start_time or "-" }}
                 {% endif %}
               </td>
-              <td class="description-cell">{{ item.description or item.content or "-" }}</td>
-              <td>{{ item.requester or item.owner or "-" }}</td>
-              <td class="status-cell">
+              <td class="description-cell" data-label="说明">{{ item.description or item.content or "-" }}</td>
+              <td data-label="提出人">{{ item.requester or item.owner or "-" }}</td>
+              <td class="status-cell" data-label="状态">
                 <span class="status status-{{ item.execution_status or item.status or '待执行' }}">{{ item.execution_status or item.status or "待执行" }}</span>
               </td>
-              <td>{{ item.execution_duration }}</td>
-              <td>{{ item.block_total_duration }}</td>
-              <td class="row-actions">
+              <td data-label="执行时长">{{ item.execution_duration }}</td>
+              <td data-label="阻塞时长">{{ item.block_total_duration }}</td>
+              <td class="row-actions" data-label="操作">
                 {% if view == "archived" %}
                   <button type="button" class="link-button" data-open-modal="detail-plan-{{ entry.index }}">详情</button>
                 {% else %}

@@ -77,6 +77,26 @@ def build_batch_complete_notice(
     return "\n".join(lines)
 
 
+def build_custom_notification(task: dict[str, str]) -> str:
+    title = task.get("title") or "消息通知"
+    lines = [
+        f"【{title}】",
+        "",
+        task.get("content") or "",
+    ]
+    doc_links = task.get("doc_links") or []
+    if doc_links:
+        lines.extend(["", "相关文档："])
+        for link in doc_links:
+            label = link.get("label") or "在线文档"
+            lines.append(f"- [{label}]({link.get('url')})")
+    elif task.get("doc_url"):
+        lines.extend(["", "相关文档：", f"- [在线文档]({task['doc_url']})"])
+    if task.get("at_all") == "true":
+        lines.extend(["", "<@all>"])
+    return "\n".join(line for line in lines if line is not None)
+
+
 def _format_list(items: list[str], empty_text: str) -> str:
     if not items:
         return f"- {empty_text}"

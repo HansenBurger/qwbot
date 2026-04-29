@@ -42,8 +42,12 @@ def next_batch_after(
 def is_business_day(items: list[dict[str, str]], today: date) -> bool:
     if today.weekday() >= 5:
         return False
+    return not is_holiday(items, today)
+
+
+def is_holiday(items: list[dict[str, str]], today: date) -> bool:
     today_text = today.isoformat()
-    return not any(
+    return any(
         (item.get("natural_date") or item.get("date")) == today_text
         and (item.get("holiday_flag") or "N") == "Y"
         for item in items

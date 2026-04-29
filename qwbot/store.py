@@ -7,7 +7,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator
 
-COLLECTIONS = {"batch_plan", "progress"}
+COLLECTIONS = {"batch_plan", "progress", "notification_tasks"}
+DEFAULT_SCHEDULER_TIMES = {
+    "morning-reminder": "09:00",
+    "evening-reminder": "18:00",
+}
 BATCH_FIELDS = [
     "content",
     "owner",
@@ -32,6 +36,7 @@ BATCH_FIELDS = [
     "execution_seconds",
 ]
 PROGRESS_FIELDS = ["content", "owner", "status", "category", "date"]
+NOTIFICATION_FIELDS = ["title", "content", "doc_url", "send_time", "at_all", "date_rule"]
 
 
 def init_store(db_path: Path, migration_path: Path | None = None) -> None:
@@ -50,6 +55,10 @@ def load_status_file(path: Path) -> dict[str, list[dict[str, Any]]]:
     return {
         "batch_plan": _load_batch_plan(path),
         "progress": _load_progress(path),
+        "notification_tasks": _load_notification_tasks(path),
+        "scheduler_times": _load_scheduler_times(path),
+        "scheduler_skip_dates": _load_scheduler_skip_dates(path),
+        "scheduler_force_dates": _load_scheduler_force_dates(path),
     }
 
 
@@ -63,6 +72,8 @@ def save_status_file(path: Path, payload: dict[str, list[dict[str, Any]]]) -> No
             _insert_batch(connection, _clean_item(item))
         for item in payload.get("progress", []):
             _insert_progress(connection, _clean_item(item))
+        for item in payload.get("notification_tasks", []):
+            _insert_notification_task(connection, _clean_notification_task(item))
 
 
 def add_item(path: Path, collection: str, item: dict[str, str]) -> int:
@@ -71,7 +82,9 @@ def add_item(path: Path, collection: str, item: dict[str, str]) -> int:
     with _connect(path) as connection:
         if collection == "batch_plan":
             return _insert_batch(connection, _clean_item(item))
-        return _insert_progress(connection, _clean_item(item))
+        if collection == "progress":
+            return _insert_progress(connection, _clean_item(item))
+        return _insert_notification_task(connection, _clean_notification_task(item))
 
 
 def update_item(path: Path, collection: str, index: int, item: dict[str, str]) -> None:
@@ -93,15 +106,23 @@ def update_item(path: Path, collection: str, index: int, item: dict[str, str]) -
     with _connect(path) as connection:
         if collection == "batch_plan":
             _update_batch(connection, index, updated_item)
-        else:
+        elif collection == "progress":
             _update_progress(connection, index, updated_item)
+        else:
+            _update_notification_task(connection, index, _clean_notification_task(item))
 
 
 def delete_item(path: Path, collection: str, index: int) -> None:
     _ensure_collection(collection)
     _ensure_schema(path)
-    table = "batch_plan" if collection == "batch_plan" else "progress"
+    table = {
+        "batch_plan": "batch_plan",
+        "progress": "progress",
+        "notification_tasks": "notification_tasks",
+    }[collection]
     with _connect(path) as connection:
+        if collection == "notification_tasks":
+            connection.execute("DELETE FROM notification_date_overrides WHERE notification_task_id = ?", (index,))
         cursor = connection.execute(f"DELETE FROM {table} WHERE id = ?", (index,))
         if cursor.rowcount == 0:
             raise IndexError(f"Item index out of range: {index}")
@@ -181,6 +202,122 @@ def has_open_block(path: Path, batch_plan_id: int) -> bool:
     return row is not None
 
 
+def update_scheduler_time(path: Path, reminder_id: str, send_time: str) -> None:
+    _ensure_schema(path)
+    with _connect(path) as connection:
+        cursor = connection.execute(
+            """
+            UPDATE scheduler_times
+            SET send_time = ?, updated_at = ?
+            WHERE reminder_id = ?
+            """,
+            (send_time.strip(), _now_iso(), reminder_id),
+        )
+        if cursor.rowcount == 0:
+            connection.execute(
+                """
+                INSERT INTO scheduler_times (reminder_id, send_time, created_at, updated_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (reminder_id, send_time.strip(), _now_iso(), _now_iso()),
+            )
+
+
+def add_scheduler_time(path: Path, send_time: str) -> None:
+    _ensure_schema(path)
+    now = _now_iso()
+    reminder_id = f"work-reminder-{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
+    with _connect(path) as connection:
+        connection.execute(
+            """
+            INSERT INTO scheduler_times (reminder_id, send_time, created_at, updated_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (reminder_id, send_time.strip(), now, now),
+        )
+
+
+def delete_scheduler_time(path: Path, reminder_id: str) -> None:
+    _ensure_schema(path)
+    with _connect(path) as connection:
+        cursor = connection.execute(
+            "DELETE FROM scheduler_times WHERE reminder_id = ?",
+            (reminder_id,),
+        )
+        if cursor.rowcount == 0:
+            raise IndexError(f"Scheduler time not found: {reminder_id}")
+
+
+def add_scheduler_skip_date(path: Path, skip_date: str) -> None:
+    _ensure_schema(path)
+    skip_date = skip_date.strip()
+    if not skip_date:
+        return
+    now = _now_iso()
+    with _connect(path) as connection:
+        connection.execute("DELETE FROM scheduler_force_dates WHERE force_date = ?", (skip_date,))
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO scheduler_skip_dates (skip_date, created_at)
+            VALUES (?, ?)
+            """,
+            (skip_date, now),
+        )
+
+
+def delete_scheduler_skip_date(path: Path, skip_date: str) -> None:
+    _ensure_schema(path)
+    with _connect(path) as connection:
+        connection.execute(
+            "DELETE FROM scheduler_skip_dates WHERE skip_date = ?",
+            (skip_date.strip(),),
+        )
+
+
+def add_scheduler_force_date(path: Path, force_date: str) -> None:
+    _ensure_schema(path)
+    force_date = force_date.strip()
+    if not force_date:
+        return
+    now = _now_iso()
+    with _connect(path) as connection:
+        connection.execute("DELETE FROM scheduler_skip_dates WHERE skip_date = ?", (force_date,))
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO scheduler_force_dates (force_date, created_at)
+            VALUES (?, ?)
+            """,
+            (force_date, now),
+        )
+
+
+def delete_scheduler_force_date(path: Path, force_date: str) -> None:
+    _ensure_schema(path)
+    with _connect(path) as connection:
+        connection.execute(
+            "DELETE FROM scheduler_force_dates WHERE force_date = ?",
+            (force_date.strip(),),
+        )
+
+
+def set_notification_date_override(path: Path, notification_task_id: int, target_date: str, mode: str) -> None:
+    _ensure_schema(path)
+    target_date = target_date.strip()
+    if not target_date or mode not in {"skip", "force"}:
+        return
+    now = _now_iso()
+    with _connect(path) as connection:
+        connection.execute(
+            """
+            INSERT INTO notification_date_overrides (notification_task_id, target_date, mode, created_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(notification_task_id, target_date)
+            DO UPDATE SET mode = excluded.mode, created_at = excluded.created_at
+            """,
+            (notification_task_id, target_date, mode, now),
+        )
+
+
 @contextmanager
 def _connect(path: Path) -> Iterator[sqlite3.Connection]:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -254,6 +391,85 @@ def _ensure_schema(path: Path) -> None:
             )
             """
         )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS notification_tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL DEFAULT '',
+                content TEXT NOT NULL DEFAULT '',
+                doc_url TEXT NOT NULL DEFAULT '',
+                send_time TEXT NOT NULL DEFAULT '',
+                at_all TEXT NOT NULL DEFAULT '',
+                date_rule TEXT NOT NULL DEFAULT 'business_day',
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        _ensure_column(connection, "notification_tasks", "date_rule", "TEXT NOT NULL DEFAULT 'business_day'")
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS scheduler_times (
+                reminder_id TEXT PRIMARY KEY,
+                send_time TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS scheduler_skip_dates (
+                skip_date TEXT PRIMARY KEY,
+                created_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS scheduler_force_dates (
+                force_date TEXT PRIMARY KEY,
+                created_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS notification_date_overrides (
+                notification_task_id INTEGER NOT NULL,
+                target_date TEXT NOT NULL DEFAULT '',
+                mode TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (notification_task_id, target_date)
+            )
+            """
+        )
+        scheduler_seeded = connection.execute(
+            "SELECT value FROM app_settings WHERE key = 'scheduler_times_seeded'"
+        ).fetchone()
+        scheduler_count = connection.execute("SELECT COUNT(*) FROM scheduler_times").fetchone()[0]
+        if not scheduler_seeded and scheduler_count == 0:
+            now = _now_iso()
+            for reminder_id, send_time in DEFAULT_SCHEDULER_TIMES.items():
+                connection.execute(
+                    """
+                    INSERT INTO scheduler_times (reminder_id, send_time, created_at, updated_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (reminder_id, send_time, now, now),
+                )
+        if not scheduler_seeded:
+            connection.execute(
+                "INSERT INTO app_settings (key, value) VALUES ('scheduler_times_seeded', 'true')"
+            )
 
 
 def _is_empty(path: Path) -> bool:
@@ -261,6 +477,15 @@ def _is_empty(path: Path) -> bool:
         batch_count = connection.execute("SELECT COUNT(*) FROM batch_plan").fetchone()[0]
         progress_count = connection.execute("SELECT COUNT(*) FROM progress").fetchone()[0]
     return batch_count == 0 and progress_count == 0
+
+
+def _ensure_column(connection: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    columns = {
+        row["name"]
+        for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+    }
+    if column not in columns:
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
 def _load_batch_plan(path: Path) -> list[dict[str, Any]]:
@@ -283,6 +508,74 @@ def _load_progress(path: Path) -> list[dict[str, Any]]:
     with _connect(path) as connection:
         rows = connection.execute("SELECT * FROM progress ORDER BY id").fetchall()
     return [{**{field: _stringify(row[field]) for field in PROGRESS_FIELDS}, "id": str(row["id"])} for row in rows]
+
+
+def _load_notification_tasks(path: Path) -> list[dict[str, Any]]:
+    with _connect(path) as connection:
+        rows = connection.execute("SELECT * FROM notification_tasks ORDER BY send_time, id").fetchall()
+        overrides_by_task = _load_notification_date_overrides(connection)
+    items = []
+    for row in rows:
+        item = {**{field: _stringify(row[field]) for field in NOTIFICATION_FIELDS}, "id": str(row["id"])}
+        item["doc_links"] = _parse_doc_links(item["doc_url"])
+        overrides = overrides_by_task.get(int(row["id"]), {"skip": [], "force": []})
+        item["skip_dates"] = [{"date": value} for value in overrides["skip"]]
+        item["force_dates"] = [{"date": value} for value in overrides["force"]]
+        items.append(item)
+    return items
+
+
+def _load_notification_date_overrides(connection: sqlite3.Connection) -> dict[int, dict[str, list[str]]]:
+    rows = connection.execute(
+        """
+        SELECT notification_task_id, target_date, mode
+        FROM notification_date_overrides
+        ORDER BY target_date
+        """
+    ).fetchall()
+    overrides: dict[int, dict[str, list[str]]] = {}
+    for row in rows:
+        task_overrides = overrides.setdefault(int(row["notification_task_id"]), {"skip": [], "force": []})
+        if row["mode"] in task_overrides:
+            task_overrides[row["mode"]].append(_stringify(row["target_date"]))
+    return overrides
+
+
+def _load_scheduler_times(path: Path) -> list[dict[str, str]]:
+    with _connect(path) as connection:
+        rows = connection.execute("SELECT * FROM scheduler_times ORDER BY send_time, reminder_id").fetchall()
+    return [
+        {
+            "id": _stringify(row["reminder_id"]),
+            "label": f"固定提醒 {index}",
+            "send_time": _stringify(row["send_time"]),
+        }
+        for index, row in enumerate(rows, start=1)
+    ]
+
+
+def _load_scheduler_skip_dates(path: Path) -> list[dict[str, str]]:
+    with _connect(path) as connection:
+        rows = connection.execute("SELECT * FROM scheduler_skip_dates ORDER BY skip_date").fetchall()
+    return [
+        {
+            "date": _stringify(row["skip_date"]),
+            "created_at": _stringify(row["created_at"]),
+        }
+        for row in rows
+    ]
+
+
+def _load_scheduler_force_dates(path: Path) -> list[dict[str, str]]:
+    with _connect(path) as connection:
+        rows = connection.execute("SELECT * FROM scheduler_force_dates ORDER BY force_date").fetchall()
+    return [
+        {
+            "date": _stringify(row["force_date"]),
+            "created_at": _stringify(row["created_at"]),
+        }
+        for row in rows
+    ]
 
 
 def _load_block_events(connection: sqlite3.Connection) -> dict[int, list[dict[str, Any]]]:
@@ -354,6 +647,32 @@ def _update_progress(connection: sqlite3.Connection, index: int, item: dict[str,
         WHERE id = ?
         """,
         [values[field] for field in PROGRESS_FIELDS] + [values["updated_at"], index],
+    )
+    if cursor.rowcount == 0:
+        raise IndexError(f"Item index out of range: {index}")
+
+
+def _insert_notification_task(connection: sqlite3.Connection, item: dict[str, str]) -> int:
+    values = {field: _coerce_field(item, field) for field in NOTIFICATION_FIELDS}
+    now = _now_iso()
+    fields = [*NOTIFICATION_FIELDS, "created_at", "updated_at"]
+    cursor = connection.execute(
+        f"INSERT INTO notification_tasks ({', '.join(fields)}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        [values[field] for field in NOTIFICATION_FIELDS] + [now, now],
+    )
+    return int(cursor.lastrowid)
+
+
+def _update_notification_task(connection: sqlite3.Connection, index: int, item: dict[str, str]) -> None:
+    values = {field: _coerce_field(item, field) for field in NOTIFICATION_FIELDS}
+    values["updated_at"] = _now_iso()
+    cursor = connection.execute(
+        """
+        UPDATE notification_tasks
+        SET title = ?, content = ?, doc_url = ?, send_time = ?, at_all = ?, date_rule = ?, updated_at = ?
+        WHERE id = ?
+        """,
+        [values[field] for field in NOTIFICATION_FIELDS] + [values["updated_at"], index],
     )
     if cursor.rowcount == 0:
         raise IndexError(f"Item index out of range: {index}")
@@ -436,6 +755,57 @@ def _clean_item(item: Any) -> dict[str, str]:
         "completed_at": _value(item, "completed_at"),
         "execution_seconds": _value(item, "execution_seconds"),
     }
+
+
+def _clean_notification_task(item: Any) -> dict[str, str]:
+    if not isinstance(item, dict):
+        item = {}
+    return {
+        "title": _value(item, "title", "标题"),
+        "content": _value(item, "content", "消息内容", "内容"),
+        "doc_url": _clean_doc_links_value(item),
+        "send_time": _value(item, "send_time", "发送时间"),
+        "at_all": "true" if _value(item, "at_all", "是否at全体") in {"true", "1", "yes", "Y", "on"} else "",
+        "date_rule": _clean_date_rule(_value(item, "date_rule", "日期规则")),
+    }
+
+
+def _clean_date_rule(value: str) -> str:
+    return value if value in {"all", "business_day", "holiday_only"} else "business_day"
+
+
+def _clean_doc_links_value(item: dict[str, Any]) -> str:
+    doc_links = item.get("doc_links")
+    if isinstance(doc_links, list):
+        cleaned = [
+            {
+                "label": str(link.get("label") or "").strip(),
+                "url": str(link.get("url") or "").strip(),
+            }
+            for link in doc_links
+            if isinstance(link, dict) and str(link.get("url") or "").strip()
+        ]
+        return json.dumps(cleaned, ensure_ascii=False) if cleaned else ""
+    return _value(item, "doc_url", "在线文档链接", "文档链接")
+
+
+def _parse_doc_links(value: str) -> list[dict[str, str]]:
+    if not value:
+        return []
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return [{"label": "在线文档", "url": value}]
+    if not isinstance(parsed, list):
+        return []
+    return [
+        {
+            "label": str(link.get("label") or "在线文档").strip(),
+            "url": str(link.get("url") or "").strip(),
+        }
+        for link in parsed
+        if isinstance(link, dict) and str(link.get("url") or "").strip()
+    ]
 
 
 def _empty_item(content: str = "") -> dict[str, str]:
