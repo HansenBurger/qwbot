@@ -262,12 +262,13 @@
 
     <div class="modal-grid">
       <label>
-        <span>变量名</span>
-        <input name="var_name" placeholder="如 progress_doc_link" required pattern="[a-z_][a-z0-9_]*">
+        <span>描述</span>
+        <input name="var_label" placeholder="如 进度统计" required data-var-label-source>
       </label>
       <label>
-        <span>描述</span>
-        <input name="var_label" placeholder="如 进度统计" required>
+        <span>变量名</span>
+        <input name="var_name" placeholder="输入后自动格式化为 snake_case" required data-auto-varname>
+        <small class="field-hint">输入后自动转为 snake_case 规范，也可手动修改</small>
       </label>
       <label class="wide">
         <span>链接地址</span>

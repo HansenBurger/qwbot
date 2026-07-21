@@ -198,3 +198,47 @@ document.addEventListener("click", (event) => {
     textarea.value = defaultTemplate;
   }
 });
+
+// Auto-format var_name to snake_case and auto-generate from label
+(function () {
+  function toSnakeCase(str) {
+    return str
+      .toLowerCase()
+      .replace(/[\s\-\.]+/g, "_")
+      .replace(/[^a-z0-9_]/g, "")
+      .replace(/_+/g, "_")
+      .replace(/^_|_$/g, "");
+  }
+
+  document.addEventListener("input", (event) => {
+    const target = event.target;
+
+    // Auto-format var_name as user types
+    if (target.matches("[data-auto-varname]")) {
+      const cursorPos = target.selectionStart;
+      const before = target.value;
+      const after = toSnakeCase(before);
+      if (before !== after) {
+        target.value = after;
+        target.selectionStart = target.selectionEnd = Math.min(cursorPos, after.length);
+      }
+      return;
+    }
+
+    // When var_label changes, auto-fill var_name if it's empty or matches a previous suggestion
+    if (target.matches("[data-var-label-source]")) {
+      const modal = target.closest(".modal-card");
+      if (!modal) return;
+      const varNameInput = modal.querySelector("[data-auto-varname]");
+      if (!varNameInput) return;
+
+      const label = target.value.trim();
+      if (!label) return;
+
+      // Only auto-fill if var_name is empty (don't overwrite user edits)
+      if (!varNameInput.value) {
+        varNameInput.value = toSnakeCase(label);
+      }
+    }
+  });
+})();
