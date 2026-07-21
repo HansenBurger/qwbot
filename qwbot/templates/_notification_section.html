@@ -92,16 +92,25 @@
         <p>编辑固定工作提醒的消息内容，支持使用变量占位符动态填充数据。</p>
       </div>
     </div>
-    <form method="post" action="{{ url_for('save_reminder_template') }}">
+    <form method="post" action="{{ url_for('save_reminder_template') }}" id="template-form">
       <div class="template-editor">
         <textarea name="template" rows="10" class="template-textarea" placeholder="输入消息模板">{{ reminder_template }}</textarea>
       </div>
       <div class="template-vars">
-        <strong>可用变量</strong>
+        <strong>系统变量</strong>
         <div class="template-vars-list">
           {% for var_name, var_desc in reminder_template_vars %}
             <button type="button" class="template-var-tag" data-insert-var="{{ var_name }}" title="点击插入变量">{ {{ var_name }} }<span>{{ var_desc }}</span></button>
           {% endfor %}
+        </div>
+      </div>
+      <div class="template-vars">
+        <strong>文档链接变量</strong>
+        <div class="template-vars-list">
+          {% for var in custom_template_vars %}
+            <button type="button" class="template-var-tag" data-insert-var="{{ var.var_name }}" title="点击插入变量：{{ var.var_label }}">{ {{ var.var_name }} }<span>{{ var.var_label }}</span></button>
+          {% endfor %}
+          <button type="button" class="template-var-tag template-var-add" data-open-modal="create-template-var" title="新增文档链接变量">+<span>新增变量</span></button>
         </div>
       </div>
       <div class="template-actions">
@@ -109,6 +118,36 @@
         <button type="button" class="secondary-button" data-reset-template data-default-template="{{ default_reminder_template | e }}">恢复默认</button>
       </div>
     </form>
+    <form method="post" action="{{ url_for('test_send_reminder_template') }}" class="template-test-form">
+      <button type="submit" class="secondary-button template-test-btn" data-confirm="确认向测试机器人发送当前模板消息？">测试发送</button>
+      <span class="template-test-hint">始终发送到自测群机器人</span>
+    </form>
+
+    <div class="template-var-list-section">
+      <div class="template-var-list-header">
+        <strong>文档链接变量管理</strong>
+        <button type="button" class="link-button" data-open-modal="create-template-var">+ 新增变量</button>
+      </div>
+      {% if custom_template_vars %}
+        <div class="template-var-table">
+          {% for var in custom_template_vars %}
+            <div class="template-var-row">
+              <form method="post" action="{{ url_for('edit_template_var', var_id=var.id) }}" class="template-var-edit-form">
+                <input name="var_name" value="{{ var.var_name }}" placeholder="变量名，如 progress_doc_link" required class="template-var-input">
+                <input name="var_label" value="{{ var.var_label }}" placeholder="描述，如 进度统计" class="template-var-input">
+                <input name="var_value" value="{{ var.var_value }}" placeholder="链接地址（留空使用 .env 配置）" class="template-var-input template-var-value-input">
+                <button type="submit">保存</button>
+              </form>
+              <form method="post" action="{{ url_for('remove_template_var', var_id=var.id) }}">
+                <button type="submit" class="danger-button compact-button" data-confirm="确认删除变量 { {{ var.var_name }} }？">删除</button>
+              </form>
+            </div>
+          {% endfor %}
+        </div>
+      {% else %}
+        <p class="empty inline-empty">暂无自定义文档链接变量。</p>
+      {% endif %}
+    </div>
   </div>
 
   <div class="custom-notification-panel">
@@ -213,3 +252,32 @@
   {% set form_action = url_for('edit_notification', index=task.id) %}
   {% include "_notification_modal.html" %}
 {% endfor %}
+
+<dialog class="modal" id="create-template-var">
+  <form class="modal-card" method="post" action="{{ url_for('create_template_var') }}">
+    <div class="modal-header">
+      <h3>新增文档链接变量</h3>
+      <button type="button" class="icon-button" data-close-modal="create-template-var" aria-label="关闭">×</button>
+    </div>
+
+    <div class="modal-grid">
+      <label>
+        <span>变量名</span>
+        <input name="var_name" placeholder="如 progress_doc_link" required pattern="[a-z_][a-z0-9_]*">
+      </label>
+      <label>
+        <span>描述</span>
+        <input name="var_label" placeholder="如 进度统计" required>
+      </label>
+      <label class="wide">
+        <span>链接地址</span>
+        <input name="var_value" placeholder="留空使用 .env 中的对应配置，填写则覆盖" type="url">
+      </label>
+    </div>
+
+    <div class="modal-actions">
+      <button type="button" class="secondary-button" data-close-modal="create-template-var">取消</button>
+      <button type="submit">保存</button>
+    </div>
+  </form>
+</dialog>

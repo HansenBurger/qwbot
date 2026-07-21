@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 from flask import Flask, redirect, render_template, request, url_for
 
 from qwbot.config import Settings
-from qwbot.message import build_batch_complete_notice, build_batch_start_notice, build_custom_notification
+from qwbot.message import build_batch_complete_notice, build_batch_start_notice, build_custom_notification, build_scheduled_reminder
 from qwbot.planner import is_business_day, is_completed, next_batch_after, sort_key
 from qwbot.store import (
     DEFAULT_REMINDER_TEMPLATE,
@@ -24,12 +24,16 @@ from qwbot.store import (
     delete_scheduler_time,
     delete_item,
     get_item,
+    add_template_var,
+    delete_template_var,
     get_reminder_template,
+    get_template_vars,
     has_open_block,
     init_store,
     load_status_file,
     set_notification_date_override,
     set_reminder_template,
+    update_template_var,
     update_scheduler_time,
     update_item,
     update_open_block_reason,
@@ -119,6 +123,7 @@ def create_app(settings: Settings) -> Flask:
             reminder_template=get_reminder_template(status_file),
             default_reminder_template=DEFAULT_REMINDER_TEMPLATE,
             reminder_template_vars=REMINDER_TEMPLATE_VARS,
+            custom_template_vars=payload.get("template_vars", []),
         )
 
     @app.post("/items/<collection>")
@@ -290,6 +295,45 @@ def create_app(settings: Settings) -> Flask:
         template = request.form.get("template", "").strip()
         if template:
             set_reminder_template(status_file, template)
+        return redirect(url_for("notification_page"))
+
+    @app.post("/reminder-template/test-send")
+    def test_send_reminder_template():
+        payload = load_status_file(status_file)
+        from qwbot.planner import active_batch_items, is_completed
+        next_batch = next(
+            (item for _, item in active_batch_items(payload["batch_plan"]) if not is_completed(item)),
+            None,
+        )
+        template = get_reminder_template(status_file)
+        message = build_scheduled_reminder(
+            settings, next_batch, template, payload.get("template_vars")
+        )
+        test_settings = settings.with_webhook_target("test")
+        WeComWebhookClient(test_settings.webhook_url).send_markdown(message)
+        return redirect(url_for("notification_page"))
+
+    @app.post("/template-vars")
+    def create_template_var():
+        var_name = request.form.get("var_name", "").strip()
+        var_label = request.form.get("var_label", "").strip()
+        var_value = request.form.get("var_value", "").strip()
+        if var_name:
+            add_template_var(status_file, var_name, var_label, var_value)
+        return redirect(url_for("notification_page"))
+
+    @app.post("/template-vars/<int:var_id>")
+    def edit_template_var(var_id: int):
+        var_name = request.form.get("var_name", "").strip()
+        var_label = request.form.get("var_label", "").strip()
+        var_value = request.form.get("var_value", "").strip()
+        if var_name:
+            update_template_var(status_file, var_id, var_name, var_label, var_value)
+        return redirect(url_for("notification_page"))
+
+    @app.post("/template-vars/<int:var_id>/delete")
+    def remove_template_var(var_id: int):
+        delete_template_var(status_file, var_id)
         return redirect(url_for("notification_page"))
 
     return app

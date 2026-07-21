@@ -12,22 +12,45 @@ def build_scheduled_reminder(
     settings: Settings,
     next_batch: dict[str, str] | None,
     template: str | None = None,
+    template_vars: list[dict[str, str]] | None = None,
 ) -> str:
+    from qwbot.store import DEFAULT_REMINDER_TEMPLATE, DEFAULT_TEMPLATE_VARS
     if template is None:
-        from qwbot.store import DEFAULT_REMINDER_TEMPLATE
         template = DEFAULT_REMINDER_TEMPLATE
     now = datetime.now(ZoneInfo(settings.timezone))
     title_date = now.strftime("%m月%d日")
+    # System variables (computed at runtime, not editable)
     variables = {
         "title_date": title_date,
-        "progress_doc_link": _format_doc_link(settings.progress_doc_url),
-        "case_assignment_doc_link": _format_doc_link(settings.case_assignment_doc_url),
-        "batch_register_doc_link": _format_doc_link(settings.batch_register_doc_url),
-        "agenda_doc_link": _format_doc_link(settings.agenda_doc_url),
         "current_trading_date": _batch_current_date(next_batch),
         "next_trading_date": _batch_next_date(next_batch),
-        "frontend_link": _format_doc_link(settings.frontend_url),
     }
+    # Merge custom template vars from DB; fall back to settings URLs when var_value is empty
+    settings_url_map = {
+        "progress_doc_link": settings.progress_doc_url,
+        "case_assignment_doc_link": settings.case_assignment_doc_url,
+        "batch_register_doc_link": settings.batch_register_doc_url,
+        "agenda_doc_link": settings.agenda_doc_url,
+        "frontend_link": settings.frontend_url,
+    }
+    if template_vars:
+        for var in template_vars:
+            var_name = var.get("var_name", "")
+            var_value = var.get("var_value", "").strip()
+            if not var_value:
+                # Fall back to settings URL for known default vars
+                fallback_url = settings_url_map.get(var_name)
+                var_value = _format_doc_link(fallback_url) if fallback_url else ""
+            else:
+                # Check if it looks like a URL (starts with http) — auto-wrap as doc link
+                if var_value.startswith("http://") or var_value.startswith("https://"):
+                    var_value = _format_doc_link(var_value)
+            variables[var_name] = var_value
+    else:
+        # No template_vars provided: use legacy fallback to settings for default vars
+        for var_name, (var_label, _) in DEFAULT_TEMPLATE_VARS.items():
+            fallback_url = settings_url_map.get(var_name)
+            variables[var_name] = _format_doc_link(fallback_url) if fallback_url else ""
     result = template
     for key, value in variables.items():
         result = result.replace("{" + key + "}", value)

@@ -72,7 +72,7 @@ def _build_scheduled_message(settings):
         None,
     )
     template = get_reminder_template(settings.db_path)
-    return build_scheduled_reminder(settings, next_batch, template)
+    return build_scheduled_reminder(settings, next_batch, template, payload.get("template_vars"))
 
 
 def _send(settings) -> None:

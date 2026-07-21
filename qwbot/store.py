@@ -22,14 +22,17 @@ DEFAULT_REMINDER_TEMPLATE = """## {title_date} 组内重点工作
 
 REMINDER_TEMPLATE_VARS = [
     ("title_date", "日期标题，如 07月22日"),
-    ("progress_doc_link", "进度统计文档链接"),
-    ("case_assignment_doc_link", "用例分工文档链接"),
-    ("batch_register_doc_link", "跑批计划文档链接"),
-    ("agenda_doc_link", "加班申请文档链接"),
     ("current_trading_date", "当前交易日"),
     ("next_trading_date", "下一交易日"),
-    ("frontend_link", "前端登记页链接"),
 ]
+
+DEFAULT_TEMPLATE_VARS = {
+    "progress_doc_link": ("进度统计文档链接", "progress_doc_url"),
+    "case_assignment_doc_link": ("用例分工文档链接", "case_assignment_doc_url"),
+    "batch_register_doc_link": ("跑批计划文档链接", "batch_register_doc_url"),
+    "agenda_doc_link": ("加班申请文档链接", "agenda_doc_url"),
+    "frontend_link": ("前端登记页链接", "frontend_url"),
+}
 BATCH_FIELDS = [
     "content",
     "owner",
@@ -77,6 +80,7 @@ def load_status_file(path: Path) -> dict[str, list[dict[str, Any]]]:
         "scheduler_times": _load_scheduler_times(path),
         "scheduler_skip_dates": _load_scheduler_skip_dates(path),
         "scheduler_force_dates": _load_scheduler_force_dates(path),
+        "template_vars": get_template_vars(path),
     }
 
 
@@ -470,6 +474,19 @@ def _ensure_schema(path: Path) -> None:
             )
             """
         )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS reminder_template_vars (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                var_name TEXT NOT NULL UNIQUE,
+                var_label TEXT NOT NULL DEFAULT '',
+                var_value TEXT NOT NULL DEFAULT '',
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
         scheduler_seeded = connection.execute(
             "SELECT value FROM app_settings WHERE key = 'scheduler_times_seeded'"
         ).fetchone()
@@ -488,6 +505,18 @@ def _ensure_schema(path: Path) -> None:
             connection.execute(
                 "INSERT INTO app_settings (key, value) VALUES ('scheduler_times_seeded', 'true')"
             )
+        # Seed default template vars if table is empty
+        vars_count = connection.execute("SELECT COUNT(*) FROM reminder_template_vars").fetchone()[0]
+        if vars_count == 0:
+            now = _now_iso()
+            for sort_order, (var_name, (var_label, _)) in enumerate(DEFAULT_TEMPLATE_VARS.items()):
+                connection.execute(
+                    """
+                    INSERT INTO reminder_template_vars (var_name, var_label, var_value, sort_order, created_at, updated_at)
+                    VALUES (?, ?, '', ?, ?, ?)
+                    """,
+                    (var_name, var_label, sort_order, now, now),
+                )
 
 
 def _is_empty(path: Path) -> bool:
@@ -617,6 +646,60 @@ def set_reminder_template(path: Path, template: str) -> None:
             """,
             (template,),
         )
+
+
+def get_template_vars(path: Path) -> list[dict[str, str]]:
+    _ensure_schema(path)
+    with _connect(path) as connection:
+        rows = connection.execute(
+            "SELECT * FROM reminder_template_vars ORDER BY sort_order, id"
+        ).fetchall()
+    return [
+        {
+            "id": str(row["id"]),
+            "var_name": _stringify(row["var_name"]),
+            "var_label": _stringify(row["var_label"]),
+            "var_value": _stringify(row["var_value"]),
+            "sort_order": int(row["sort_order"]),
+        }
+        for row in rows
+    ]
+
+
+def add_template_var(path: Path, var_name: str, var_label: str, var_value: str) -> int:
+    _ensure_schema(path)
+    with _connect(path) as connection:
+        max_order = connection.execute(
+            "SELECT COALESCE(MAX(sort_order), -1) FROM reminder_template_vars"
+        ).fetchone()[0]
+        now = _now_iso()
+        cursor = connection.execute(
+            """
+            INSERT INTO reminder_template_vars (var_name, var_label, var_value, sort_order, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (var_name.strip(), var_label.strip(), var_value.strip(), max_order + 1, now, now),
+        )
+        return int(cursor.lastrowid)
+
+
+def update_template_var(path: Path, var_id: int, var_name: str, var_label: str, var_value: str) -> None:
+    _ensure_schema(path)
+    with _connect(path) as connection:
+        connection.execute(
+            """
+            UPDATE reminder_template_vars
+            SET var_name = ?, var_label = ?, var_value = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (var_name.strip(), var_label.strip(), var_value.strip(), _now_iso(), var_id),
+        )
+
+
+def delete_template_var(path: Path, var_id: int) -> None:
+    _ensure_schema(path)
+    with _connect(path) as connection:
+        connection.execute("DELETE FROM reminder_template_vars WHERE id = ?", (var_id,))
 
 
 def _load_block_events(connection: sqlite3.Connection) -> dict[int, list[dict[str, Any]]]:

@@ -1526,8 +1526,8 @@ button:hover {
 
 .template-textarea:focus {
   outline: none;
-  border-color: #4f7cff;
-  box-shadow: 0 0 0 3px rgba(79, 124, 255, 0.12);
+  border-color: #3164d4;
+  box-shadow: 0 0 0 3px rgba(49, 100, 212, 0.12);
   background: #fff;
 }
 
@@ -1557,15 +1557,15 @@ button:hover {
   border-radius: 6px;
   background: #fff;
   font-size: 12px;
-  color: #4f7cff;
+  color: #3164d4;
   cursor: pointer;
   transition: all 0.15s;
   font-family: "SF Mono", "Monaco", "Menlo", "Consolas", monospace;
 }
 
 .template-var-tag:hover {
-  background: #f0f4ff;
-  border-color: #4f7cff;
+  background: #eef4ff;
+  border-color: #3164d4;
 }
 
 .template-var-tag span {
@@ -1574,38 +1574,160 @@ button:hover {
   font-size: 11px;
 }
 
+.template-var-tag.template-var-add {
+  border-style: dashed;
+  color: #3164d4;
+}
+
+.template-var-tag.template-var-add:hover {
+  background: #eef4ff;
+  border-color: #3164d4;
+}
+
 .template-actions {
   display: flex;
   gap: 10px;
-}
-
-.template-actions button {
-  padding: 8px 20px;
-  border-radius: 8px;
-  font-size: 14px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: all 0.15s;
+  margin-bottom: 12px;
 }
 
 .template-actions button[type="submit"] {
-  background: #4f7cff;
+  background: #3164d4;
   color: #fff;
-  border: none;
+  border: 0;
+  border-radius: 10px;
+  font-weight: 700;
+  padding: 9px 14px;
+  cursor: pointer;
 }
 
 .template-actions button[type="submit"]:hover {
-  background: #3d6ae8;
+  background: #244fb0;
 }
 
 .template-actions .secondary-button {
-  background: #fff;
-  color: #4a5568;
-  border: 1px solid #d9e0eb;
+  background: #eef2f8;
+  color: #344054;
+  border: 0;
+  border-radius: 10px;
+  font-weight: 700;
+  padding: 9px 14px;
+  cursor: pointer;
 }
 
 .template-actions .secondary-button:hover {
-  background: #f8faff;
-  border-color: #4f7cff;
-  color: #4f7cff;
+  background: #dde6f2;
+}
+
+.template-test-form {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.template-test-btn {
+  background: #eef2f8;
+  color: #344054;
+  border: 0;
+  border-radius: 10px;
+  font-weight: 700;
+  padding: 9px 14px;
+  cursor: pointer;
+}
+
+.template-test-btn:hover {
+  background: #dde6f2;
+}
+
+.template-test-hint {
+  font-size: 12px;
+  color: #8a94a6;
+}
+
+.template-var-list-section {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid #edf1f7;
+}
+
+.template-var-list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.template-var-list-header strong {
+  font-size: 13px;
+  color: #4a5568;
+}
+
+.template-var-table {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.template-var-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.template-var-edit-form {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+}
+
+.template-var-input {
+  padding: 6px 10px;
+  border: 1px solid #d9e0eb;
+  border-radius: 6px;
+  font-size: 13px;
+  min-width: 0;
+}
+
+.template-var-input[name="var_name"] {
+  width: 180px;
+  font-family: "SF Mono", "Monaco", "Menlo", "Consolas", monospace;
+  font-size: 12px;
+}
+
+.template-var-input[name="var_label"] {
+  width: 140px;
+}
+
+.template-var-input[name="var_value"] {
+  flex: 1;
+}
+
+.template-var-input:focus {
+  outline: none;
+  border-color: #3164d4;
+  box-shadow: 0 0 0 2px rgba(49, 100, 212, 0.1);
+}
+
+.template-var-edit-form button {
+  background: #3164d4;
+  color: #fff;
+  border: 0;
+  border-radius: 8px;
+  font-weight: 700;
+  padding: 6px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.template-var-edit-form button:hover {
+  background: #244fb0;
+}
+
+.compact-button {
+  padding: 6px 12px;
+  font-size: 12px;
+  border-radius: 8px;
+  white-space: nowrap;
 }
