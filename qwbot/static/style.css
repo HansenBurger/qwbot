@@ -1499,3 +1499,113 @@ button:hover {
     margin-top: 8px;
   }
 }
+
+/* Reminder Template Panel */
+.reminder-template-panel {
+  border-top: 1px solid #edf1f7;
+  padding: 18px 22px 20px;
+}
+
+.template-editor {
+  margin-bottom: 12px;
+}
+
+.template-textarea {
+  width: 100%;
+  min-height: 160px;
+  padding: 12px 14px;
+  border: 1px solid #d9e0eb;
+  border-radius: 10px;
+  font-family: "SF Mono", "Monaco", "Menlo", "Consolas", monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  resize: vertical;
+  background: #f8faff;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.template-textarea:focus {
+  outline: none;
+  border-color: #4f7cff;
+  box-shadow: 0 0 0 3px rgba(79, 124, 255, 0.12);
+  background: #fff;
+}
+
+.template-vars {
+  margin-bottom: 14px;
+}
+
+.template-vars strong {
+  display: block;
+  font-size: 13px;
+  color: #4a5568;
+  margin-bottom: 8px;
+}
+
+.template-vars-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.template-var-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid #d9e0eb;
+  border-radius: 6px;
+  background: #fff;
+  font-size: 12px;
+  color: #4f7cff;
+  cursor: pointer;
+  transition: all 0.15s;
+  font-family: "SF Mono", "Monaco", "Menlo", "Consolas", monospace;
+}
+
+.template-var-tag:hover {
+  background: #f0f4ff;
+  border-color: #4f7cff;
+}
+
+.template-var-tag span {
+  color: #8a94a6;
+  font-family: inherit;
+  font-size: 11px;
+}
+
+.template-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.template-actions button {
+  padding: 8px 20px;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.template-actions button[type="submit"] {
+  background: #4f7cff;
+  color: #fff;
+  border: none;
+}
+
+.template-actions button[type="submit"]:hover {
+  background: #3d6ae8;
+}
+
+.template-actions .secondary-button {
+  background: #fff;
+  color: #4a5568;
+  border: 1px solid #d9e0eb;
+}
+
+.template-actions .secondary-button:hover {
+  background: #f8faff;
+  border-color: #4f7cff;
+  color: #4f7cff;
+}

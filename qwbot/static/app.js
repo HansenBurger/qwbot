@@ -162,3 +162,39 @@ function updateClock() {
     hour12: false,
   }).format(now);
 }
+
+// Reminder template variable insertion
+document.addEventListener("click", (event) => {
+  const tag = event.target.closest("[data-insert-var]");
+  if (!tag) return;
+
+  const varName = tag.dataset.insertVar;
+  const textarea = document.querySelector(".template-textarea");
+  if (!textarea) return;
+
+  const insertion = "{" + varName + "}";
+  const start = textarea.selectionStart;
+  const end = textarea.selectionEnd;
+  const text = textarea.value;
+
+  textarea.value = text.slice(0, start) + insertion + text.slice(end);
+  textarea.selectionStart = textarea.selectionEnd = start + insertion.length;
+  textarea.focus();
+});
+
+// Reset template to default
+document.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-reset-template]");
+  if (!button) return;
+
+  if (!confirm("确认恢复默认模板？当前修改将丢失。")) return;
+
+  const textarea = document.querySelector(".template-textarea");
+  if (!textarea) return;
+
+  // Get default template from data attribute or reload
+  const defaultTemplate = button.dataset.defaultTemplate;
+  if (defaultTemplate) {
+    textarea.value = defaultTemplate;
+  }
+});

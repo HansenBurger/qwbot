@@ -85,6 +85,32 @@
     </div>
   </div>
 
+  <div class="reminder-template-panel">
+    <div class="subsection-heading">
+      <div>
+        <h3>默认消息模板</h3>
+        <p>编辑固定工作提醒的消息内容，支持使用变量占位符动态填充数据。</p>
+      </div>
+    </div>
+    <form method="post" action="{{ url_for('save_reminder_template') }}">
+      <div class="template-editor">
+        <textarea name="template" rows="10" class="template-textarea" placeholder="输入消息模板">{{ reminder_template }}</textarea>
+      </div>
+      <div class="template-vars">
+        <strong>可用变量</strong>
+        <div class="template-vars-list">
+          {% for var_name, var_desc in reminder_template_vars %}
+            <button type="button" class="template-var-tag" data-insert-var="{{ var_name }}" title="点击插入变量">{ {{ var_name }} }<span>{{ var_desc }}</span></button>
+          {% endfor %}
+        </div>
+      </div>
+      <div class="template-actions">
+        <button type="submit">保存模板</button>
+        <button type="button" class="secondary-button" data-reset-template data-default-template="{{ default_reminder_template | e }}">恢复默认</button>
+      </div>
+    </form>
+  </div>
+
   <div class="custom-notification-panel">
     <div class="subsection-heading">
       <div>

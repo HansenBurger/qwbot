@@ -10,7 +10,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from qwbot.config import load_settings
 from qwbot.message import build_custom_notification, build_scheduled_reminder
 from qwbot.planner import active_batch_items, is_business_day, is_completed, is_holiday
-from qwbot.store import init_store, load_status_file
+from qwbot.store import get_reminder_template, init_store, load_status_file
 from qwbot.wecom import WeComWebhookClient
 
 
@@ -71,7 +71,8 @@ def _build_scheduled_message(settings):
         (item for _, item in active_batch_items(payload["batch_plan"]) if not is_completed(item)),
         None,
     )
-    return build_scheduled_reminder(settings, next_batch)
+    template = get_reminder_template(settings.db_path)
+    return build_scheduled_reminder(settings, next_batch, template)
 
 
 def _send(settings) -> None:

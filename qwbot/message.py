@@ -8,27 +8,30 @@ from qwbot.planner import batch_title
 from qwbot.sources import ReminderData
 
 
-def build_scheduled_reminder(settings: Settings, next_batch: dict[str, str] | None) -> str:
+def build_scheduled_reminder(
+    settings: Settings,
+    next_batch: dict[str, str] | None,
+    template: str | None = None,
+) -> str:
+    if template is None:
+        from qwbot.store import DEFAULT_REMINDER_TEMPLATE
+        template = DEFAULT_REMINDER_TEMPLATE
     now = datetime.now(ZoneInfo(settings.timezone))
     title_date = now.strftime("%m月%d日")
-
-    return "\n".join(
-        [
-            f"## {title_date} 组内重点工作",
-            (
-                f"进度统计：{_format_doc_link(settings.progress_doc_url)}　"
-                f"用例分工：{_format_doc_link(settings.case_assignment_doc_url)}"
-            ),
-            (
-                f"跑批计划：{_format_doc_link(settings.batch_register_doc_url)}　"
-                f"加班申请：{_format_doc_link(settings.agenda_doc_url)}"
-            ),
-            "",
-            f"当前交易日：<font color=\"info\">{_batch_current_date(next_batch)}</font>",
-            f"下一交易日：<font color=\"info\">{_batch_next_date(next_batch)}</font>",
-            f"跑批计划修改和登记：{_format_doc_link(settings.frontend_url)}",
-        ]
-    )
+    variables = {
+        "title_date": title_date,
+        "progress_doc_link": _format_doc_link(settings.progress_doc_url),
+        "case_assignment_doc_link": _format_doc_link(settings.case_assignment_doc_url),
+        "batch_register_doc_link": _format_doc_link(settings.batch_register_doc_url),
+        "agenda_doc_link": _format_doc_link(settings.agenda_doc_url),
+        "current_trading_date": _batch_current_date(next_batch),
+        "next_trading_date": _batch_next_date(next_batch),
+        "frontend_link": _format_doc_link(settings.frontend_url),
+    }
+    result = template
+    for key, value in variables.items():
+        result = result.replace("{" + key + "}", value)
+    return result
 
 
 def build_daily_reminder(settings: Settings, data: ReminderData) -> str:

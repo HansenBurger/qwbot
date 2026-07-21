@@ -12,6 +12,24 @@ DEFAULT_SCHEDULER_TIMES = {
     "morning-reminder": "09:00",
     "evening-reminder": "18:00",
 }
+DEFAULT_REMINDER_TEMPLATE = """## {title_date} 组内重点工作
+进度统计：{progress_doc_link} 用例分工：{case_assignment_doc_link}
+跑批计划：{batch_register_doc_link} 加班申请：{agenda_doc_link}
+
+当前交易日：<font color="info">{current_trading_date}</font>
+下一交易日：<font color="info">{next_trading_date}</font>
+跑批计划修改和登记：{frontend_link}"""
+
+REMINDER_TEMPLATE_VARS = [
+    ("title_date", "日期标题，如 07月22日"),
+    ("progress_doc_link", "进度统计文档链接"),
+    ("case_assignment_doc_link", "用例分工文档链接"),
+    ("batch_register_doc_link", "跑批计划文档链接"),
+    ("agenda_doc_link", "加班申请文档链接"),
+    ("current_trading_date", "当前交易日"),
+    ("next_trading_date", "下一交易日"),
+    ("frontend_link", "前端登记页链接"),
+]
 BATCH_FIELDS = [
     "content",
     "owner",
@@ -576,6 +594,29 @@ def _load_scheduler_force_dates(path: Path) -> list[dict[str, str]]:
         }
         for row in rows
     ]
+
+
+def get_reminder_template(path: Path) -> str:
+    _ensure_schema(path)
+    with _connect(path) as connection:
+        row = connection.execute(
+            "SELECT value FROM app_settings WHERE key = 'reminder_template'"
+        ).fetchone()
+    if row and row["value"]:
+        return row["value"]
+    return DEFAULT_REMINDER_TEMPLATE
+
+
+def set_reminder_template(path: Path, template: str) -> None:
+    _ensure_schema(path)
+    with _connect(path) as connection:
+        connection.execute(
+            """
+            INSERT INTO app_settings (key, value) VALUES ('reminder_template', ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (template,),
+        )
 
 
 def _load_block_events(connection: sqlite3.Connection) -> dict[int, list[dict[str, Any]]]:

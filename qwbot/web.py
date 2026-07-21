@@ -11,6 +11,8 @@ from qwbot.config import Settings
 from qwbot.message import build_batch_complete_notice, build_batch_start_notice, build_custom_notification
 from qwbot.planner import is_business_day, is_completed, next_batch_after, sort_key
 from qwbot.store import (
+    DEFAULT_REMINDER_TEMPLATE,
+    REMINDER_TEMPLATE_VARS,
     add_block_event,
     add_item,
     add_scheduler_force_date,
@@ -22,10 +24,12 @@ from qwbot.store import (
     delete_scheduler_time,
     delete_item,
     get_item,
+    get_reminder_template,
     has_open_block,
     init_store,
     load_status_file,
     set_notification_date_override,
+    set_reminder_template,
     update_scheduler_time,
     update_item,
     update_open_block_reason,
@@ -112,6 +116,9 @@ def create_app(settings: Settings) -> Flask:
             ),
             current_hour=_current_hour(settings.timezone),
             current_time=_current_time(settings.timezone),
+            reminder_template=get_reminder_template(status_file),
+            default_reminder_template=DEFAULT_REMINDER_TEMPLATE,
+            reminder_template_vars=REMINDER_TEMPLATE_VARS,
         )
 
     @app.post("/items/<collection>")
@@ -276,6 +283,13 @@ def create_app(settings: Settings) -> Flask:
     @app.post("/scheduler-force-dates/delete")
     def remove_scheduler_force_date():
         delete_scheduler_force_date(status_file, request.form.get("force_date", ""))
+        return redirect(url_for("notification_page"))
+
+    @app.post("/reminder-template")
+    def save_reminder_template():
+        template = request.form.get("template", "").strip()
+        if template:
+            set_reminder_template(status_file, template)
         return redirect(url_for("notification_page"))
 
     return app
