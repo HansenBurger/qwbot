@@ -1384,10 +1384,6 @@ button:hover {
     margin-top: 10px;
   }
 
-  .modal-grid {
-    grid-template-columns: 1fr;
-  }
-
   .wide {
     grid-column: span 1;
   }
