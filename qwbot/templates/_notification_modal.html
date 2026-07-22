@@ -45,6 +45,16 @@
           <span>+</span>
           新增文档
         </button>
+        {% if custom_template_vars %}
+        <div class="doc-link-var-hint">
+          <span>或快速引用公共变量：</span>
+          <div class="doc-link-var-list">
+            {% for var in custom_template_vars %}
+              <button type="button" class="doc-link-var-tag" data-insert-doc-var="{{ var.var_name }}" data-var-label="{{ var.var_label | e }}" title="插入变量引用：{ {{ var.var_name }} }">{ {{ var.var_name }} }</button>
+            {% endfor %}
+          </div>
+        </div>
+        {% endif %}
       </div>
       <label class="checkbox-label wide">
         <input type="checkbox" name="at_all" value="true" {% if task.at_all == "true" %}checked{% endif %}>

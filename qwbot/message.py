@@ -38,19 +38,15 @@ def build_scheduled_reminder(
             var_name = var.get("var_name", "")
             var_value = var.get("var_value", "").strip()
             if not var_value:
-                # Fall back to settings URL for known default vars
+                # Fall back to settings URL for known default vars (raw URL)
                 fallback_url = settings_url_map.get(var_name)
-                var_value = _format_doc_link(fallback_url) if fallback_url else ""
-            else:
-                # Check if it looks like a URL (starts with http) — auto-wrap as doc link
-                if var_value.startswith("http://") or var_value.startswith("https://"):
-                    var_value = _format_doc_link(var_value)
+                var_value = fallback_url or ""
             variables[var_name] = var_value
     else:
         # No template_vars provided: use legacy fallback to settings for default vars
         for var_name, (var_label, _) in DEFAULT_TEMPLATE_VARS.items():
             fallback_url = settings_url_map.get(var_name)
-            variables[var_name] = _format_doc_link(fallback_url) if fallback_url else ""
+            variables[var_name] = fallback_url or ""
     result = template
     for key, value in variables.items():
         result = result.replace("{" + key + "}", value)
@@ -103,7 +99,11 @@ def build_batch_complete_notice(
     return "\n".join(lines)
 
 
-def build_custom_notification(task: dict[str, str]) -> str:
+def build_custom_notification(
+    task: dict[str, str],
+    template_vars: list[dict[str, str]] | None = None,
+    settings: Settings | None = None,
+) -> str:
     title = task.get("title") or "消息通知"
     lines = [
         f"【{title}】",
@@ -115,12 +115,54 @@ def build_custom_notification(task: dict[str, str]) -> str:
         lines.extend(["", "相关文档："])
         for link in doc_links:
             label = link.get("label") or "在线文档"
-            lines.append(f"- [{label}]({link.get('url')})")
+            url = link.get("url") or ""
+            url = _resolve_doc_url(url, template_vars, settings)
+            lines.append(f"- [{label}]({url})")
     elif task.get("doc_url"):
-        lines.extend(["", "相关文档：", f"- [在线文档]({task['doc_url']})"])
+        url = _resolve_doc_url(task["doc_url"], template_vars, settings)
+        lines.extend(["", "相关文档：", f"- [在线文档]({url})"])
     if task.get("at_all") == "true":
         lines.extend(["", "<@all>"])
     return "\n".join(line for line in lines if line is not None)
+
+
+def _resolve_doc_url(
+    url: str,
+    template_vars: list[dict[str, str]] | None,
+    settings: Settings | None,
+) -> str:
+    """Resolve {var_name} references in a doc URL."""
+    if not url or not url.startswith("{") or not template_vars:
+        return url
+
+    # Build variable map
+    var_map = {}
+    settings_url_map = {}
+    if settings:
+        settings_url_map = {
+            "progress_doc_link": settings.progress_doc_url,
+            "case_assignment_doc_link": settings.case_assignment_doc_url,
+            "batch_register_doc_link": settings.batch_register_doc_url,
+            "agenda_doc_link": settings.agenda_doc_url,
+            "frontend_link": settings.frontend_url,
+        }
+
+    for var in template_vars:
+        var_name = var.get("var_name", "")
+        var_value = var.get("var_value", "").strip()
+        if not var_value:
+            # Fall back to settings URL for known default vars
+            fallback_url = settings_url_map.get(var_name)
+            var_value = fallback_url if fallback_url else ""
+        var_map[var_name] = var_value
+
+    # Replace {var_name} references
+    import re
+    def replace_var(match):
+        var_name = match.group(1)
+        return var_map.get(var_name, match.group(0))
+
+    return re.sub(r"\{([^}]+)\}", replace_var, url)
 
 
 def _format_list(items: list[str], empty_text: str) -> str:

@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>消息通知维护</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <script src="https://cdn.jsdelivr.net/npm/pinyin-pro@3.26.0/dist/index.min.js"></script>
     <script defer src="{{ url_for('static', filename='app.js') }}"></script>
   </head>
   <body>
@@ -25,6 +26,12 @@
           <time data-clock-time>--:--</time>
         </div>
       </header>
+
+      {% if request.args.get('error') %}
+        <div class="error-message">
+          {{ request.args.get('error') }}
+        </div>
+      {% endif %}
 
       {% include "_notification_section.html" %}
     </main>

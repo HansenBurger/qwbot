@@ -88,67 +88,181 @@
   <div class="reminder-template-panel">
     <div class="subsection-heading">
       <div>
-        <h3>默认消息模板</h3>
-        <p>编辑固定工作提醒的消息内容，支持使用变量占位符动态填充数据。</p>
+        <h3>消息模板</h3>
+        <p>管理多个消息模板，启用指定模板用于固定工作提醒；支持变量占位符动态填充数据。</p>
       </div>
     </div>
-    <form method="post" action="{{ url_for('save_reminder_template') }}" id="template-form">
-      <div class="template-editor">
-        <textarea name="template" rows="10" class="template-textarea" placeholder="输入消息模板">{{ reminder_template }}</textarea>
+
+    {# ── Template list ── #}
+    <div class="template-list-section">
+      <div class="template-list-header">
+        <strong>已保存模板</strong>
       </div>
-      <div class="template-vars">
-        <strong>系统变量</strong>
+      {% if reminder_templates %}
+        <div class="template-list">
+          {% for tpl in reminder_templates %}
+            <div class="template-list-item {% if tpl.is_active %}active{% endif %}">
+              <div class="template-list-item-main">
+                <form method="post" action="{{ url_for('activate_reminder_template', template_id=tpl.id) }}" class="template-activate-form">
+                  <button type="submit" class="template-radio {% if tpl.is_active %}checked{% endif %}" title="{% if tpl.is_active %}当前启用{% else %}点击启用{% endif %}">
+                    {% if tpl.is_active %}<span class="radio-dot"></span>{% endif %}
+                  </button>
+                </form>
+                <div class="template-list-item-info">
+                  <strong>{{ tpl.name }}</strong>
+                  {% if tpl.is_active %}<span class="pill active-pill">启用中</span>{% endif %}
+                </div>
+              </div>
+              <div class="template-list-item-actions">
+                <button type="button" class="link-button" data-load-template data-template-id="{{ tpl.id }}" data-template-content="{{ tpl.template_content | e }}" data-template-name="{{ tpl.name | e }}">加载编辑</button>
+                {% if reminder_templates | length > 1 %}
+                <form method="post" action="{{ url_for('remove_reminder_template', template_id=tpl.id) }}">
+                  <button type="submit" class="link-button danger-text" data-confirm="确认删除模板「{{ tpl.name }}」？">删除</button>
+                </form>
+                {% endif %}
+              </div>
+            </div>
+          {% endfor %}
+        </div>
+      {% else %}
+        <p class="empty inline-empty">暂无模板。</p>
+      {% endif %}
+    </div>
+
+    {# ── Template editor ── #}
+    <form method="post" action="{{ url_for('save_reminder_template') }}" id="template-form" data-template-cache>
+      <input type="hidden" name="template_id" value="{{ active_template_id }}" data-template-id-field>
+      <input type="hidden" name="template_name" value="{% for tpl in reminder_templates %}{% if tpl.is_active %}{{ tpl.name }}{% endif %}{% endfor %}" data-template-name-field>
+      <div class="template-editor">
+        <div class="template-editor-toolbar">
+          <span class="template-editor-label" data-template-display-name>{% for tpl in reminder_templates %}{% if tpl.is_active %}{{ tpl.name }}{% endif %}{% endfor %}</span>
+          <div class="template-editor-actions">
+            <button type="button" class="link-button" data-save-as-template>另存为新模板</button>
+          </div>
+        </div>
+        <textarea name="template" rows="10" class="template-textarea" placeholder="输入消息模板" data-template-textarea>{{ reminder_template }}</textarea>
+      </div>
+
+      {# ── Collapsible system vars ── #}
+      <details class="template-vars-collapse">
+        <summary class="template-vars-summary">
+          <strong>系统变量</strong>
+          <span class="vars-count">{{ reminder_template_vars | length }} 个</span>
+        </summary>
         <div class="template-vars-list">
           {% for var_name, var_desc in reminder_template_vars %}
             <button type="button" class="template-var-tag" data-insert-var="{{ var_name }}" title="点击插入变量">{ {{ var_name }} }<span>{{ var_desc }}</span></button>
           {% endfor %}
         </div>
-      </div>
-      <div class="template-vars">
-        <strong>文档链接变量</strong>
+      </details>
+
+      {# ── Collapsible doc link vars ── #}
+      <details class="template-vars-collapse">
+        <summary class="template-vars-summary">
+          <strong>文档链接变量</strong>
+          <span class="vars-count">{{ custom_template_vars | length }} 个</span>
+        </summary>
         <div class="template-vars-list">
           {% for var in custom_template_vars %}
-            <button type="button" class="template-var-tag" data-insert-var="{{ var.var_name }}" title="点击插入变量：{{ var.var_label }}">{ {{ var.var_name }} }<span>{{ var.var_label }}</span></button>
+            <button type="button" class="template-var-tag" data-insert-var="{{ var.var_name }}" data-var-label="{{ var.var_label }}" title="点击插入变量：{{ var.var_label }}">{ {{ var.var_name }} }<span>{{ var.var_label }}</span></button>
           {% endfor %}
           <button type="button" class="template-var-tag template-var-add" data-open-modal="create-template-var" title="新增文档链接变量">+<span>新增变量</span></button>
         </div>
-      </div>
+      </details>
+
+      <details class="template-vars-collapse">
+        <summary class="template-vars-summary">
+          <strong>样式片段</strong>
+          <span class="vars-count">8 个</span>
+        </summary>
+        <div class="template-vars-list">
+          <button type="button" class="template-var-tag style-snippet" data-insert-snippet="## " title="插入标题">## <span>标题</span></button>
+          <button type="button" class="template-var-tag style-snippet snippet-green" data-insert-snippet="&lt;font color=&quot;info&quot;&gt;文字&lt;/font&gt;" title="绿色文字"><font color="info">Aa</font><span>绿色</span></button>
+          <button type="button" class="template-var-tag style-snippet snippet-orange" data-insert-snippet="&lt;font color=&quot;warning&quot;&gt;文字&lt;/font&gt;" title="橙色文字"><font color="warning">Aa</font><span>橙色</span></button>
+          <button type="button" class="template-var-tag style-snippet snippet-gray" data-insert-snippet="&lt;font color=&quot;comment&quot;&gt;文字&lt;/font&gt;" title="灰色文字"><font color="comment">Aa</font><span>灰色</span></button>
+          <button type="button" class="template-var-tag style-snippet" data-insert-snippet="[文字](链接)" title="插入链接">[]<span>链接</span></button>
+          <button type="button" class="template-var-tag style-snippet" data-insert-snippet="&lt;@all&gt;" title="@所有人">@<span>全体</span></button>
+          <button type="button" class="template-var-tag style-snippet" data-insert-snippet="- " title="列表项">-<span>列表</span></button>
+          <button type="button" class="template-var-tag style-snippet" data-insert-snippet="> " title="引用">><span>引用</span></button>
+        </div>
+      </details>
+
       <div class="template-actions">
         <button type="submit">保存模板</button>
-        <button type="button" class="secondary-button" data-reset-template data-default-template="{{ default_reminder_template | e }}">恢复默认</button>
+        <button type="button" class="secondary-button" data-preview-template>预览效果</button>
+        <button type="button" class="secondary-button" data-test-send title="始终发送到自测群机器人">测试发送</button>
       </div>
-    </form>
-    <form method="post" action="{{ url_for('test_send_reminder_template') }}" class="template-test-form">
-      <button type="submit" class="secondary-button template-test-btn" data-confirm="确认向测试机器人发送当前模板消息？">测试发送</button>
-      <span class="template-test-hint">始终发送到自测群机器人</span>
     </form>
 
-    <div class="template-var-list-section">
-      <div class="template-var-list-header">
-        <strong>文档链接变量管理</strong>
-        <button type="button" class="link-button" data-open-modal="create-template-var">+ 新增变量</button>
+
+  </div>
+
+  {# ── Create template modal ── #}
+
+
+  <div class="doc-link-vars-panel">
+    <div class="subsection-heading">
+      <div>
+        <h3>公共文档链接</h3>
+        <p>管理公共文档链接变量，消息模板和自定义通知都可引用。</p>
       </div>
-      {% if custom_template_vars %}
-        <div class="template-var-table">
+      <button type="button" class="link-button" data-open-modal="create-template-var">+ 新增变量</button>
+    </div>
+    {% if custom_template_vars %}
+      <div class="doc-link-var-table">
+        {% for var in custom_template_vars[:5] %}
+          <div class="doc-link-var-table-row">
+            <form method="post" action="{{ url_for('edit_template_var', var_id=var.id) }}" class="doc-link-var-edit-form">
+              <input name="var_name" value="{{ var.var_name }}" class="template-var-input" data-auto-varname placeholder="变量名">
+              <input name="var_label" value="{{ var.var_label }}" class="template-var-input" data-var-label-source placeholder="描述">
+              <input name="var_value" value="{{ var.var_value }}" class="template-var-input" placeholder="链接（留空用 .env）">
+              <button type="submit">保存</button>
+            </form>
+            <form method="post" action="{{ url_for('remove_template_var', var_id=var.id) }}">
+              <button type="submit" class="danger-button" data-confirm="确认删除变量 { {{ var.var_name }} }？">删除</button>
+            </form>
+          </div>
+        {% endfor %}
+      </div>
+      {% if custom_template_vars | length > 5 %}
+        <div class="doc-link-var-more">
+          <button type="button" class="link-button" data-open-modal="all-doc-link-vars">查看全部 ({{ custom_template_vars | length }})</button>
+        </div>
+      {% endif %}
+    {% else %}
+      <p class="empty inline-empty">暂无公共文档链接变量，请点击"新增变量"添加。</p>
+    {% endif %}
+  </div>
+
+  <dialog class="modal" id="all-doc-link-vars">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3>全部公共文档链接</h3>
+        <button type="button" class="icon-button" data-close-modal="all-doc-link-vars" aria-label="关闭">×</button>
+      </div>
+      <div class="modal-search">
+        <input type="text" id="doc-link-var-search" placeholder="搜索变量名或描述..." class="modal-search-input">
+      </div>
+      <div class="modal-content">
+        <div class="doc-link-var-table" id="all-doc-link-var-list">
           {% for var in custom_template_vars %}
-            <div class="template-var-row">
-              <form method="post" action="{{ url_for('edit_template_var', var_id=var.id) }}" class="template-var-edit-form">
-                <input name="var_name" value="{{ var.var_name }}" placeholder="变量名，如 progress_doc_link" required class="template-var-input">
-                <input name="var_label" value="{{ var.var_label }}" placeholder="描述，如 进度统计" class="template-var-input">
-                <input name="var_value" value="{{ var.var_value }}" placeholder="链接地址（留空使用 .env 配置）" class="template-var-input template-var-value-input">
+            <div class="doc-link-var-table-row" data-var-name="{{ var.var_name | lower }}" data-var-label="{{ var.var_label | lower }}">
+              <form method="post" action="{{ url_for('edit_template_var', var_id=var.id) }}" class="doc-link-var-edit-form">
+                <input name="var_name" value="{{ var.var_name }}" class="template-var-input" data-auto-varname placeholder="变量名">
+                <input name="var_label" value="{{ var.var_label }}" class="template-var-input" data-var-label-source placeholder="描述">
+                <input name="var_value" value="{{ var.var_value }}" class="template-var-input" placeholder="链接（留空用 .env）">
                 <button type="submit">保存</button>
               </form>
               <form method="post" action="{{ url_for('remove_template_var', var_id=var.id) }}">
-                <button type="submit" class="danger-button compact-button" data-confirm="确认删除变量 { {{ var.var_name }} }？">删除</button>
+                <button type="submit" class="danger-button" data-confirm="确认删除变量 { {{ var.var_name }} }？">删除</button>
               </form>
             </div>
           {% endfor %}
         </div>
-      {% else %}
-        <p class="empty inline-empty">暂无自定义文档链接变量。</p>
-      {% endif %}
+        <p class="empty inline-empty" id="doc-link-var-no-results" style="display: none;">未找到匹配的变量</p>
+      </div>
     </div>
-  </div>
+  </dialog>
 
   <div class="custom-notification-panel">
     <div class="subsection-heading">
@@ -230,6 +344,22 @@
       {% endif %}
     </div>
   </div>
+  <dialog class="modal" id="template-preview-modal">
+    <div class="modal-card template-preview-card">
+      <div class="modal-header">
+        <h3>模板预览</h3>
+        <button type="button" class="icon-button" data-close-modal="template-preview-modal" aria-label="关闭">×</button>
+      </div>
+      <div class="template-preview-container">
+        <div class="wecom-chat-bubble">
+          <div class="wecom-message" id="template-preview-content"></div>
+        </div>
+      </div>
+      <div class="template-preview-hint">
+        <p>预览效果仅供参考，实际显示以企业微信客户端为准</p>
+      </div>
+    </div>
+  </dialog>
 </section>
 
 {% set modal_id = "create-notification" %}
@@ -267,7 +397,7 @@
       </label>
       <label>
         <span>变量名</span>
-        <input name="var_name" placeholder="输入后自动格式化为 snake_case" required data-auto-varname>
+        <input name="var_name" placeholder="自动根据描述生成（拼音格式）" data-auto-varname>
       </label>
       <label class="wide">
         <span>链接地址</span>

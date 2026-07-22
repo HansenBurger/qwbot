@@ -24,15 +24,22 @@ from qwbot.store import (
     delete_scheduler_time,
     delete_item,
     get_item,
+    add_template,
     add_template_var,
+    check_duplicate_var_value,
+    delete_template,
     delete_template_var,
+    get_active_template,
     get_reminder_template,
+    get_templates,
     get_template_vars,
     has_open_block,
     init_store,
     load_status_file,
+    set_active_template,
     set_notification_date_override,
     set_reminder_template,
+    update_template,
     update_template_var,
     update_scheduler_time,
     update_item,
@@ -120,10 +127,12 @@ def create_app(settings: Settings) -> Flask:
             ),
             current_hour=_current_hour(settings.timezone),
             current_time=_current_time(settings.timezone),
-            reminder_template=get_reminder_template(status_file),
+            reminder_template=get_active_template(status_file),
             default_reminder_template=DEFAULT_REMINDER_TEMPLATE,
             reminder_template_vars=REMINDER_TEMPLATE_VARS,
             custom_template_vars=payload.get("template_vars", []),
+            reminder_templates=get_templates(status_file),
+            active_template_id=_active_template_id(get_templates(status_file)),
         )
 
     @app.post("/items/<collection>")
@@ -242,7 +251,10 @@ def create_app(settings: Settings) -> Flask:
     @app.post("/notifications/<int:index>/send-now")
     def send_notification_now(index: int):
         task = get_item(status_file, "notification_tasks", index)
-        WeComWebhookClient(settings.webhook_url).send_markdown(build_custom_notification(task))
+        payload = load_status_file(status_file)
+        template_vars = payload.get("template_vars", [])
+        message = build_custom_notification(task, template_vars, settings)
+        WeComWebhookClient(settings.webhook_url).send_markdown(message)
         return redirect(url_for("notification_page"))
 
     @app.post("/notifications/<int:index>/skip-date")
@@ -293,8 +305,34 @@ def create_app(settings: Settings) -> Flask:
     @app.post("/reminder-template")
     def save_reminder_template():
         template = request.form.get("template", "").strip()
+        template_id = request.form.get("template_id", "").strip()
         if template:
-            set_reminder_template(status_file, template)
+            if template_id:
+                update_template(status_file, int(template_id), request.form.get("template_name", "默认模板"), template)
+            else:
+                set_reminder_template(status_file, template)
+        return redirect(url_for("notification_page"))
+
+    @app.post("/reminder-templates")
+    def create_reminder_template():
+        name = request.form.get("name", "").strip()
+        template_content = request.form.get("template_content", "").strip()
+        if name:
+            add_template(status_file, name, template_content or DEFAULT_REMINDER_TEMPLATE)
+        return redirect(url_for("notification_page"))
+
+    @app.post("/reminder-templates/<int:template_id>/delete")
+    def remove_reminder_template(template_id: int):
+        templates = get_templates(status_file)
+        if len(templates) <= 1:
+            # Prevent deleting the last template
+            return redirect(url_for("notification_page"))
+        delete_template(status_file, template_id)
+        return redirect(url_for("notification_page"))
+
+    @app.post("/reminder-templates/<int:template_id>/activate")
+    def activate_reminder_template(template_id: int):
+        set_active_template(status_file, template_id)
         return redirect(url_for("notification_page"))
 
     @app.post("/reminder-template/test-send")
@@ -305,7 +343,8 @@ def create_app(settings: Settings) -> Flask:
             (item for _, item in active_batch_items(payload["batch_plan"]) if not is_completed(item)),
             None,
         )
-        template = get_reminder_template(status_file)
+        # Use template from form if provided, otherwise fall back to active template
+        template = request.form.get("template", "").strip() or get_active_template(status_file)
         message = build_scheduled_reminder(
             settings, next_batch, template, payload.get("template_vars")
         )
@@ -319,6 +358,10 @@ def create_app(settings: Settings) -> Flask:
         var_label = request.form.get("var_label", "").strip()
         var_value = request.form.get("var_value", "").strip()
         if var_name:
+            if var_value:
+                duplicate = check_duplicate_var_value(status_file, var_value)
+                if duplicate:
+                    return redirect(url_for("notification_page", error=f"链接已存在于变量 {duplicate}"))
             add_template_var(status_file, var_name, var_label, var_value)
         return redirect(url_for("notification_page"))
 
@@ -328,6 +371,10 @@ def create_app(settings: Settings) -> Flask:
         var_label = request.form.get("var_label", "").strip()
         var_value = request.form.get("var_value", "").strip()
         if var_name:
+            if var_value:
+                duplicate = check_duplicate_var_value(status_file, var_value, exclude_id=var_id)
+                if duplicate:
+                    return redirect(url_for("notification_page", error=f"链接已存在于变量 {duplicate}"))
             update_template_var(status_file, var_id, var_name, var_label, var_value)
         return redirect(url_for("notification_page"))
 
@@ -572,6 +619,14 @@ def _paginate_entries(
         "next_page": page + 1,
         "start_index": start,
     }
+
+
+
+def _active_template_id(templates: list[dict]) -> str:
+    for tpl in templates:
+        if tpl.get("is_active"):
+            return tpl["id"]
+    return ""
 
 
 def _is_archived(item: dict[str, object]) -> bool:

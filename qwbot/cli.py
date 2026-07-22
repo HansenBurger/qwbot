@@ -10,7 +10,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from qwbot.config import load_settings
 from qwbot.message import build_custom_notification, build_scheduled_reminder
 from qwbot.planner import active_batch_items, is_business_day, is_completed, is_holiday
-from qwbot.store import get_reminder_template, init_store, load_status_file
+from qwbot.store import get_active_template, init_store, load_status_file
 from qwbot.wecom import WeComWebhookClient
 
 
@@ -71,7 +71,7 @@ def _build_scheduled_message(settings):
         (item for _, item in active_batch_items(payload["batch_plan"]) if not is_completed(item)),
         None,
     )
-    template = get_reminder_template(settings.db_path)
+    template = get_active_template(settings.db_path)
     return build_scheduled_reminder(settings, next_batch, template, payload.get("template_vars"))
 
 
@@ -158,7 +158,7 @@ def _send_due_notifications(settings, sent_keys: set[str]) -> None:
         key = f"{today_text}:custom:{task['id']}:{current_time}"
         if key in sent_keys:
             continue
-        client.send_markdown(build_custom_notification(task))
+        client.send_markdown(build_custom_notification(task, payload.get("template_vars", []), settings))
         sent_keys.add(key)
         print(f"Custom notification sent: {task.get('title') or task['id']} {current_time}.")
 

@@ -13,12 +13,12 @@ DEFAULT_SCHEDULER_TIMES = {
     "evening-reminder": "18:00",
 }
 DEFAULT_REMINDER_TEMPLATE = """## {title_date} 组内重点工作
-进度统计：{progress_doc_link} 用例分工：{case_assignment_doc_link}
-跑批计划：{batch_register_doc_link} 加班申请：{agenda_doc_link}
+进度统计：[点击]({progress_doc_link}) 用例分工：[点击]({case_assignment_doc_link})
+跑批计划：[点击]({batch_register_doc_link}) 加班申请：[点击]({agenda_doc_link})
 
 当前交易日：<font color="info">{current_trading_date}</font>
 下一交易日：<font color="info">{next_trading_date}</font>
-跑批计划修改和登记：{frontend_link}"""
+跑批计划修改和登记：[点击]({frontend_link})"""
 
 REMINDER_TEMPLATE_VARS = [
     ("title_date", "日期标题，如 07月22日"),
@@ -505,7 +505,36 @@ def _ensure_schema(path: Path) -> None:
             connection.execute(
                 "INSERT INTO app_settings (key, value) VALUES ('scheduler_times_seeded', 'true')"
             )
-        # Seed default template vars if table is empty
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS reminder_templates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL DEFAULT '',
+                template_content TEXT NOT NULL DEFAULT '',
+                is_active INTEGER NOT NULL DEFAULT 0,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        # Seed default reminder_templates if table is empty
+        tpl_count = connection.execute("SELECT COUNT(*) FROM reminder_templates").fetchone()[0]
+        if tpl_count == 0:
+            now = _now_iso()
+            # Migrate existing template from app_settings if present
+            existing = connection.execute(
+                "SELECT value FROM app_settings WHERE key = 'reminder_template'"
+            ).fetchone()
+            tpl_content = existing["value"] if existing and existing["value"] else DEFAULT_REMINDER_TEMPLATE
+            connection.execute(
+                """
+                INSERT INTO reminder_templates (name, template_content, is_active, sort_order, created_at, updated_at)
+                VALUES (?, ?, 1, 0, ?, ?)
+                """,
+                ("默认模板", tpl_content, now, now),
+            )
+                # Seed default template vars if table is empty
         vars_count = connection.execute("SELECT COUNT(*) FROM reminder_template_vars").fetchone()[0]
         if vars_count == 0:
             now = _now_iso()
@@ -652,7 +681,7 @@ def get_template_vars(path: Path) -> list[dict[str, str]]:
     _ensure_schema(path)
     with _connect(path) as connection:
         rows = connection.execute(
-            "SELECT * FROM reminder_template_vars ORDER BY sort_order, id"
+            "SELECT * FROM reminder_template_vars ORDER BY sort_order DESC, id DESC"
         ).fetchall()
     return [
         {
@@ -696,11 +725,120 @@ def update_template_var(path: Path, var_id: int, var_name: str, var_label: str, 
         )
 
 
+
+def check_duplicate_var_value(path: Path, var_value: str, exclude_id: int | None = None) -> str | None:
+    """Check if var_value (URL) is already used by another variable.
+    Returns the var_name of the duplicate, or None if not found.
+    """
+    if not var_value.strip():
+        return None
+    _ensure_schema(path)
+    with _connect(path) as connection:
+        if exclude_id:
+            row = connection.execute(
+                "SELECT var_name FROM reminder_template_vars WHERE var_value = ? AND id != ?",
+                (var_value.strip(), exclude_id)
+            ).fetchone()
+        else:
+            row = connection.execute(
+                "SELECT var_name FROM reminder_template_vars WHERE var_value = ?",
+                (var_value.strip(),)
+            ).fetchone()
+        return row["var_name"] if row else None
+
+
 def delete_template_var(path: Path, var_id: int) -> None:
     _ensure_schema(path)
     with _connect(path) as connection:
         connection.execute("DELETE FROM reminder_template_vars WHERE id = ?", (var_id,))
 
+
+
+
+def get_templates(path: Path) -> list[dict[str, str]]:
+    _ensure_schema(path)
+    with _connect(path) as connection:
+        rows = connection.execute(
+            "SELECT * FROM reminder_templates ORDER BY sort_order, id"
+        ).fetchall()
+    return [
+        {
+            "id": str(row["id"]),
+            "name": _stringify(row["name"]),
+            "template_content": _stringify(row["template_content"]),
+            "is_active": bool(row["is_active"]),
+            "sort_order": int(row["sort_order"]),
+        }
+        for row in rows
+    ]
+
+
+def get_active_template(path: Path) -> str:
+    _ensure_schema(path)
+    with _connect(path) as connection:
+        row = connection.execute(
+            "SELECT template_content FROM reminder_templates WHERE is_active = 1 ORDER BY id LIMIT 1"
+        ).fetchone()
+    if row and row["template_content"]:
+        return row["template_content"]
+    return get_reminder_template(path)
+
+
+def add_template(path: Path, name: str, template_content: str) -> int:
+    _ensure_schema(path)
+    with _connect(path) as connection:
+        max_order = connection.execute(
+            "SELECT COALESCE(MAX(sort_order), -1) FROM reminder_templates"
+        ).fetchone()[0]
+        now = _now_iso()
+        cursor = connection.execute(
+            """
+            INSERT INTO reminder_templates (name, template_content, is_active, sort_order, created_at, updated_at)
+            VALUES (?, ?, 0, ?, ?, ?)
+            """,
+            (name.strip(), template_content.strip(), max_order + 1, now, now),
+        )
+        return int(cursor.lastrowid)
+
+
+def update_template(path: Path, template_id: int, name: str, template_content: str) -> None:
+    _ensure_schema(path)
+    with _connect(path) as connection:
+        connection.execute(
+            """
+            UPDATE reminder_templates
+            SET name = ?, template_content = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (name.strip(), template_content.strip(), _now_iso(), template_id),
+        )
+
+
+def delete_template(path: Path, template_id: int) -> None:
+    _ensure_schema(path)
+    with _connect(path) as connection:
+        row = connection.execute(
+            "SELECT is_active FROM reminder_templates WHERE id = ?", (template_id,)
+        ).fetchone()
+        connection.execute("DELETE FROM reminder_templates WHERE id = ?", (template_id,))
+        # If deleted template was active, activate the first remaining template
+        if row and row["is_active"]:
+            first = connection.execute(
+                "SELECT id FROM reminder_templates ORDER BY sort_order, id LIMIT 1"
+            ).fetchone()
+            if first:
+                connection.execute(
+                    "UPDATE reminder_templates SET is_active = 1 WHERE id = ?", (first["id"],)
+                )
+
+
+def set_active_template(path: Path, template_id: int) -> None:
+    _ensure_schema(path)
+    with _connect(path) as connection:
+        connection.execute("UPDATE reminder_templates SET is_active = 0")
+        connection.execute(
+            "UPDATE reminder_templates SET is_active = 1 WHERE id = ?", (template_id,)
+        )
 
 def _load_block_events(connection: sqlite3.Connection) -> dict[int, list[dict[str, Any]]]:
     rows = connection.execute(
