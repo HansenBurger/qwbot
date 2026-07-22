@@ -1,4 +1,4 @@
-#!/usr/bin/env sh
+#!/usr/bin/env bash
 set -eu
-
-docker compose down
+cd "$(dirname "$0")/.."
+exec bash scripts/deploy.sh stop

@@ -1,10 +1,4 @@
-#!/usr/bin/env sh
+#!/usr/bin/env bash
 set -eu
-
-service="${1:-}"
-
-if [ -n "$service" ]; then
-  docker compose logs -f "$service"
-else
-  docker compose logs -f
-fi
+cd "$(dirname "$0")/.."
+exec bash scripts/deploy.sh logs "$@"
