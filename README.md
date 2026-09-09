@@ -270,6 +270,7 @@ sh scripts/deploy.sh
 sh scripts/logs.sh
 sh scripts/logs.sh web
 sh scripts/logs.sh scheduler
+sh scripts/logs.sh scheduler 50   # 只打印最后 50 行后退出（本地驱动支持）
 ```
 
 1. 手动测试定时任务逻辑：
@@ -282,6 +283,14 @@ sh scripts/test-scheduled.sh
 
 ```sh
 sh scripts/stop.sh
+```
+
+`logs.sh` 和 `stop.sh` 会通过 `scripts/deploy-driver.sh` 自动选择驱动：服务器签出（存在 `data/sample_status.json` 且没有 `.venv`）走 `deploy.sh`，开发机走 `local-deploy.sh`。判断不准时可以强制指定，也可以直接运行 `sh scripts/deploy-driver.sh` 看当前会选哪个：
+
+```sh
+QWBOT_DEPLOY_DRIVER=server sh scripts/logs.sh
+QWBOT_DEPLOY_DRIVER=local sh scripts/stop.sh
+sh scripts/deploy-driver.sh
 ```
 
 `docker-compose.yml` 中 Web 服务监听容器内 `0.0.0.0:5000`，服务器通过 `QWBOT_PORT` 暴露端口；`scheduler` 服务单独运行定时任务，和 Web 服务共享 `./data:/app/data`。因为调度器每 30 秒重新读取数据库，页面上新增或修改机器人、模板、通知时间后 `scheduler` 容器**不需要重启**即可生效。

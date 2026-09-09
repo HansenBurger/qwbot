@@ -198,9 +198,17 @@
 - `reset-db` 优先在宿主机删库，失败（`data/` 目录属于容器内 root）时自动改用一次性容器删除。
 - 镜像信息用 `docker images --format` 而不是 `docker image inspect --format`：启用 containerd 镜像存储后 inspect 返回的结构没有 `Repository` 字段。
 
+**入口脚本自动选驱动：**
+- 新增 `scripts/deploy-driver.sh`，只输出一件事：当前签出该用哪个驱动。判定规则是"存在 `data/sample_status.json` 且没有 `.venv`"→ 服务器（`deploy.sh`），否则 → 开发机（`local-deploy.sh`）。`QWBOT_DEPLOY_DRIVER=local|server` 可强制覆盖，非法值直接报错退出。
+- `scripts/logs.sh` 和 `scripts/stop.sh` 改为通过它转发，同一条命令在笔记本和服务器上都能用；转发前会打印 `[*] 使用 scripts/xxx.sh ...`，不会出现"不知道走了哪条路径"的情况。
+- 删除 `scripts/dev-web.bat` 和 `scripts/test-scheduled.bat`：开发机统一在 WSL，Windows 批处理与 `dev.sh` / `test-scheduled.sh` 完全重复，全项目无任何引用。
+
 **文件改动：**
 - `scripts/local-deploy.sh`: 新增
-- `README.md`: 新增「本地 Docker 部署」章节，并标注 `deploy.sh` 与 `local-deploy.sh` 的分工
+- `scripts/deploy-driver.sh`: 新增，驱动判定
+- `scripts/logs.sh` / `scripts/stop.sh`: 改为按判定结果转发
+- `scripts/dev-web.bat` / `scripts/test-scheduled.bat`: 删除
+- `README.md`: 新增「本地 Docker 部署」章节，标注 `deploy.sh` 与 `local-deploy.sh` 的分工，说明驱动判定与覆盖方式
 
 ### 9. 死文件与死代码清理
 
@@ -456,3 +464,5 @@ sh scripts/selftest.sh          # 92 passed + All 50 self-test assertions passed
 | 端口占用 | 5000 被 `python -m http.server` 占用时自动改用 5001，`.env` 的 `QWBOT_PORT` 与 `FRONTEND_URL` 同步更新，容器映射 `0.0.0.0:5001->5000` |
 | `rebuild` | `--no-cache` 全量重建 + `--force-recreate`，重建后 `url` 与 `dispatch 09:00` 均正常 |
 | `stop` | 容器与网络移除，`.env` 和 `data/` 保留 |
+
+驱动判定 5 个场景实测：开发机（有 `.venv`）→ `local-deploy.sh`；服务器（有 `sample_status.json` 无 `.venv`）→ `deploy.sh`；两者都有 → 判为开发机；`QWBOT_DEPLOY_DRIVER=server|local` 覆盖生效；非法值报错 `exit 1`。`logs.sh` / `stop.sh` 在自动判定和强制 server 两种模式下都实际跑通（`[*] 使用 scripts/local-deploy.sh stop` / `[*] 使用 scripts/deploy.sh stop`）。
