@@ -27,12 +27,17 @@ DEFAULT_REMINDER_TEMPLATE = """## {title_date} 组内重点工作
 
 当前交易日：<font color="info">{current_trading_date}</font>
 下一交易日：<font color="info">{next_trading_date}</font>
+当日批开始时间：<font color="warning">{today_batch_start_times}</font>
+当日批后会计日期：<font color="info">{today_post_batch_date}</font>
 跑批计划修改和登记：[点击]({frontend_link})"""
 
 REMINDER_TEMPLATE_VARS = [
     ("title_date", "日期标题，如 07月22日"),
-    ("current_trading_date", "当前交易日"),
-    ("next_trading_date", "下一交易日"),
+    ("current_trading_date", "当前交易日（当日第一批的批前会计日期）"),
+    ("next_trading_date", "下一交易日（当日最后一批的批后会计日期）"),
+    ("today_batch_start_times", "当日批开始时间，一天多批时用、分隔"),
+    ("today_post_batch_date", "当日批后会计日期（当天最后一批跑完后的日期）"),
+    ("today_batch_detail", "当日批量明细，每批一行：时间+说明+批前/批后日期"),
 ]
 
 DEFAULT_TEMPLATE_VARS = {
@@ -675,8 +680,75 @@ def delete_template_var(path: Path, var_id: int) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 应用开关（QWB-003）：存在 app_settings 里，页面上改完立即生效，不用重启
+# ---------------------------------------------------------------------------
+
+BATCH_EVENT_NOTIFY_KEY = "batch_event_notify"
+
+
+def get_app_setting(path: Path, key: str, default: str = "") -> str:
+    _ensure_schema(path)
+    with _connect(path) as connection:
+        row = connection.execute(
+            "SELECT value FROM app_settings WHERE key = ?", (key,)
+        ).fetchone()
+    return _stringify(row["value"]) if row else default
+
+
+def set_app_setting(path: Path, key: str, value: str) -> None:
+    _ensure_schema(path)
+    with _connect(path) as connection:
+        connection.execute(
+            "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)",
+            (key, _stringify(value)),
+        )
+
+
+def batch_event_notify_enabled(path: Path) -> bool:
+    """跑批页点“开始/完成”时是否立刻推送到默认机器人。
+
+    一天多批时逐个批前后都推送噪声太大，默认关闭；当日批开始时间和批后日期改由
+    消息模板里的 `{today_batch_start_times}` / `{today_post_batch_date}` 统一播报。
+    """
+    return get_app_setting(path, BATCH_EVENT_NOTIFY_KEY, "false").strip().lower() in {
+        "true",
+        "1",
+        "yes",
+        "on",
+    }
+
+
+def set_batch_event_notify(path: Path, enabled: bool) -> None:
+    set_app_setting(path, BATCH_EVENT_NOTIFY_KEY, "true" if enabled else "false")
+
+
+# ---------------------------------------------------------------------------
 # Webhook / message template / schedule model (QWB-002)
 # ---------------------------------------------------------------------------
+
+
+TEMPLATE_SCHEDULES_DDL = """
+        CREATE TABLE IF NOT EXISTS template_schedules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            template_id INTEGER NOT NULL,
+            send_time TEXT NOT NULL DEFAULT '',
+            date_rule TEXT NOT NULL DEFAULT '',
+            is_enabled INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT '',
+            FOREIGN KEY (template_id) REFERENCES message_templates(id) ON DELETE CASCADE
+        )
+        """
+TEMPLATE_DATE_OVERRIDES_DDL = """
+        CREATE TABLE IF NOT EXISTS template_date_overrides (
+            template_id INTEGER NOT NULL,
+            target_date TEXT NOT NULL DEFAULT '',
+            mode TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (template_id, target_date),
+            FOREIGN KEY (template_id) REFERENCES message_templates(id) ON DELETE CASCADE
+        )
+        """
 
 
 def _ensure_webhook_schema(connection: sqlite3.Connection) -> None:
@@ -713,32 +785,8 @@ def _ensure_webhook_schema(connection: sqlite3.Connection) -> None:
         )
         """
     )
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS template_schedules (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            template_id INTEGER NOT NULL,
-            send_time TEXT NOT NULL DEFAULT '',
-            date_rule TEXT NOT NULL DEFAULT '',
-            is_enabled INTEGER NOT NULL DEFAULT 1,
-            created_at TEXT NOT NULL DEFAULT '',
-            updated_at TEXT NOT NULL DEFAULT '',
-            FOREIGN KEY (template_id) REFERENCES message_templates(id) ON DELETE CASCADE
-        )
-        """
-    )
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS template_date_overrides (
-            template_id INTEGER NOT NULL,
-            target_date TEXT NOT NULL DEFAULT '',
-            mode TEXT NOT NULL DEFAULT '',
-            created_at TEXT NOT NULL DEFAULT '',
-            PRIMARY KEY (template_id, target_date),
-            FOREIGN KEY (template_id) REFERENCES message_templates(id) ON DELETE CASCADE
-        )
-        """
-    )
+    connection.execute(TEMPLATE_SCHEDULES_DDL)
+    connection.execute(TEMPLATE_DATE_OVERRIDES_DDL)
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_message_templates_webhook"
         " ON message_templates(webhook_id)"
@@ -747,6 +795,94 @@ def _ensure_webhook_schema(connection: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_template_schedules_template"
         " ON template_schedules(template_id)"
     )
+    _upgrade_pre_release_webhook_schema(connection)
+
+
+def _upgrade_pre_release_webhook_schema(connection: sqlite3.Connection) -> None:
+    """补齐 QWB-002 定稿前的试验版结构，否则老库一打开就报 `no such column`。
+
+    试验版把机器人标签存在 `webhooks.env`、启用位存在 `webhooks.enabled`，通知时间
+    存在带 `weekdays` / `legacy_id` 且外键指向 `reminder_templates` 的
+    `template_schedules` 里。`CREATE TABLE IF NOT EXISTS` 不会修改已存在的表，所以
+    这里按列名和建表语句识别旧结构，缺列就补、外键指错就重建。健康的库两个判断都
+    不成立，函数是空操作。
+    """
+    _upgrade_legacy_webhook_columns(connection)
+    _rebuild_legacy_template_table(connection, "template_schedules", TEMPLATE_SCHEDULES_DDL)
+    _rebuild_legacy_template_table(
+        connection, "template_date_overrides", TEMPLATE_DATE_OVERRIDES_DDL
+    )
+
+
+def _upgrade_legacy_webhook_columns(connection: sqlite3.Connection) -> None:
+    columns = _table_columns(connection, "webhooks")
+    if not columns or "sort_order" in columns:
+        return
+    _ensure_column(connection, "webhooks", "target", "TEXT NOT NULL DEFAULT 'custom'")
+    _ensure_column(connection, "webhooks", "is_enabled", "INTEGER NOT NULL DEFAULT 1")
+    _ensure_column(connection, "webhooks", "sort_order", "INTEGER NOT NULL DEFAULT 0")
+    for column in ("last_status", "last_detail", "last_checked_at"):
+        _ensure_column(connection, "webhooks", column, "TEXT NOT NULL DEFAULT ''")
+    if "env" in columns:
+        connection.execute(
+            "UPDATE webhooks SET target = env WHERE env <> '' AND target = 'custom'"
+        )
+    if "enabled" in columns:
+        connection.execute("UPDATE webhooks SET is_enabled = enabled")
+
+
+def _rebuild_legacy_template_table(
+    connection: sqlite3.Connection,
+    table: str,
+    ddl: str,
+) -> None:
+    """Recreate a template table whose foreign key still points at `reminder_templates`."""
+    row = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
+    ).fetchone()
+    if row is None or "reminder_templates" not in _stringify(row["sql"]):
+        return
+
+    legacy_rows = connection.execute(f"SELECT * FROM {table}").fetchall()
+    connection.execute(f"DROP TABLE {table}")
+    connection.execute(ddl)
+
+    known_templates = {
+        int(item["id"])
+        for item in connection.execute("SELECT id FROM message_templates").fetchall()
+    }
+    now = _now_iso()
+    for old in legacy_rows:
+        template_id = int(_row_value(old, "template_id") or 0)
+        if template_id not in known_templates:
+            # 指向 reminder_templates 的旧行由 _migrate_to_webhook_model 按
+            # scheduler_times / notification_tasks 重新生成，这里不猜对应关系。
+            continue
+        if table == "template_schedules":
+            _insert_schedule(
+                connection,
+                template_id,
+                _normalize_send_time(_row_value(old, "send_time")),
+                _clean_optional_date_rule(_row_value(old, "date_rule")),
+                bool(_row_value(old, "is_enabled", _row_value(old, "enabled", 1))),
+                now,
+            )
+            continue
+        mode = _stringify(_row_value(old, "mode"))
+        target_date = _stringify(_row_value(old, "target_date"))
+        if mode in {"skip", "force"} and target_date:
+            _insert_date_override(connection, template_id, target_date, mode, now)
+
+
+def _table_columns(connection: sqlite3.Connection, table: str) -> set[str]:
+    return {row["name"] for row in connection.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def _row_value(row: sqlite3.Row, column: str, default: Any = "") -> Any:
+    try:
+        return row[column]
+    except (IndexError, KeyError):
+        return default
 
 
 def _seed_webhooks(

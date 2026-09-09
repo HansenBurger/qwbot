@@ -102,12 +102,12 @@
                 {% else %}
                   {% if entry.can_start %}
                     <form method="post" action="{{ url_for('start_item', index=entry.index) }}">
-                      <button type="submit" class="link-button" data-confirm="确认通知批量开始执行？">开始</button>
+                      <button type="submit" class="link-button" data-confirm="{{ '确认通知批量开始执行？' if batch_notify_enabled else '确认开始该批量？（批量即时通知已关闭，不会推送消息）' }}">开始</button>
                     </form>
                   {% endif %}
                   {% if entry.can_complete %}
                     <form method="post" action="{{ url_for('complete_item', index=entry.index) }}">
-                      <button type="submit" class="link-button" data-confirm="确认通知批量执行完成？">完成</button>
+                      <button type="submit" class="link-button" data-confirm="{{ '确认通知批量执行完成？' if batch_notify_enabled else '确认该批量已完成？（批量即时通知已关闭，不会推送消息）' }}">完成</button>
                     </form>
                   {% endif %}
                   {% if entry.is_sequence_blocked %}

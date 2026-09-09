@@ -48,6 +48,33 @@
   </div>
 </section>
 
+<section class="board batch-notify-board" id="batch-event-notify">
+  <div class="board-header">
+    <div>
+      <h2>批量即时通知</h2>
+      <p>
+        跑批计划页点“开始/完成”时是否立刻推送到默认机器人。一天多批时建议关闭，
+        改由消息模板里的 <code>{today_batch_start_times}</code> 和
+        <code>{today_post_batch_date}</code> 统一播报当日批开始时间和批后日期。
+      </p>
+    </div>
+    <form class="batch-notify-toggle" method="post" action="{{ url_for('update_batch_event_notify') }}">
+      <input type="hidden" name="enabled" value="{{ 'false' if batch_notify_enabled else 'true' }}">
+      <span class="pill {{ 'holiday-N' if batch_notify_enabled else 'off-pill' }}">
+        {{ '已开启' if batch_notify_enabled else '已关闭' }}
+      </span>
+      <button type="submit" class="link-button">{{ '关闭' if batch_notify_enabled else '开启' }}</button>
+    </form>
+  </div>
+  <p class="batch-notify-hint muted-text">
+    {% if batch_notify_enabled %}
+      当前：每个批“开始”会 @所有人 推送，“完成”会推送已完成批量和下一批量。
+    {% else %}
+      当前：点“开始/完成”只更新计划状态、执行时长和归档，不推送消息；定时消息模板照常按通知时间发送。
+    {% endif %}
+  </p>
+</section>
+
 <section class="board doc-link-board">
   <div class="doc-link-vars-panel">
     <div class="subsection-heading">

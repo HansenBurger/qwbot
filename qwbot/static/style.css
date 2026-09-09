@@ -727,6 +727,19 @@ button:hover {
   margin: 4px 0 0;
 }
 
+.batch-notify-toggle {
+  align-items: center;
+  display: flex;
+  flex-shrink: 0;
+  gap: 10px;
+}
+
+.batch-notify-hint {
+  border-top: 1px solid #edf1f7;
+  margin: 0;
+  padding: 12px 22px 16px;
+}
+
 .reminder-date-panel {
   background: linear-gradient(180deg, #f8faff 0%, #fff 100%);
   border: 1px solid #e8eef7;

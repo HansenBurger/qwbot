@@ -564,7 +564,7 @@ def test_legacy_routes_are_gone(client) -> None:
         assert client.post(path, data={}).status_code in (404, 405), path
 
 
-def test_batch_start_notice_goes_to_the_default_webhook(client, db_path: Path) -> None:
+def _create_batch(client, db_path: Path) -> int:
     client.post(
         "/items/batch_plan",
         data={
@@ -577,7 +577,27 @@ def test_batch_start_notice_goes_to_the_default_webhook(client, db_path: Path) -
     )
     items = store.load_status_file(db_path)["batch_plan"]
     assert len(items) == 1
-    index = int(items[0]["id"])
+    return int(items[0]["id"])
+
+
+def test_batch_event_notices_are_off_by_default(client, db_path: Path) -> None:
+    """一天多批时不再逐个批推送，点“开始/完成”只更新状态。"""
+    index = _create_batch(client, db_path)
+    assert store.batch_event_notify_enabled(db_path) is False
+
+    client.post(f"/items/batch_plan/{index}/start")
+    assert FakeWebhookClient.sent == []
+    assert store.get_item(db_path, "batch_plan", index)["execution_status"] == "进行中"
+
+    client.post(f"/items/batch_plan/{index}/complete")
+    assert FakeWebhookClient.sent == []
+    assert store.get_item(db_path, "batch_plan", index)["execution_status"] == "已完成"
+
+
+def test_batch_event_notices_go_to_the_default_webhook_when_enabled(client, db_path: Path) -> None:
+    index = _create_batch(client, db_path)
+    assert "已开启" in location(client.post("/batch-event-notify", data={"enabled": "true"}))
+    assert store.batch_event_notify_enabled(db_path) is True
 
     client.post(f"/items/batch_plan/{index}/start")
     assert FakeWebhookClient.sent, "batch start notice was not sent"
@@ -591,6 +611,9 @@ def test_batch_start_notice_goes_to_the_default_webhook(client, db_path: Path) -
     assert FakeWebhookClient.sent
     assert FakeWebhookClient.sent[-1]["url"] == MOCK_TEST_URL
     assert "批量完成通知" in FakeWebhookClient.sent[-1]["content"]
+
+    assert "已关闭" in location(client.post("/batch-event-notify", data={"enabled": ""}))
+    assert store.batch_event_notify_enabled(db_path) is False
 
 
 def test_mask_webhook_url() -> None:

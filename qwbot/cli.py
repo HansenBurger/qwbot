@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import time
 from datetime import date, datetime
+from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -10,7 +11,8 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 from qwbot.config import Settings, load_settings
 from qwbot.message import render_message_template
-from qwbot.planner import active_batch_items, is_business_day, is_completed, is_holiday
+from qwbot.plan_import import DEFAULT_SHEET, PAST_MODES, import_plan_file
+from qwbot.planner import daily_batch_context, is_business_day, is_holiday
 from qwbot.store import (
     get_default_webhook,
     get_webhook,
@@ -23,6 +25,7 @@ from qwbot.store import (
     resolve_webhook_url,
 )
 from qwbot.wecom import WeComWebhookClient
+from qwbot.xlsx import XlsxError
 
 CONNECTIVITY_TEST_TEXT = "企业微信机器人连通性测试成功。"
 
@@ -31,11 +34,48 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="企业微信贷款核算测试提醒机器人")
     parser.add_argument(
         "command",
-        choices=["send-now", "run-scheduled-once", "schedule", "test-webhook", "preview", "web"],
+        choices=[
+            "send-now",
+            "run-scheduled-once",
+            "schedule",
+            "test-webhook",
+            "preview",
+            "import-plan",
+            "web",
+        ],
         help=(
             "send-now 强制发送；run-scheduled-once 手动执行一次定时任务逻辑；"
-            "schedule 常驻定时；test-webhook 发送测试消息；preview 仅预览；web 启动维护页面"
+            "schedule 常驻定时；test-webhook 发送测试消息；preview 仅预览；"
+            "import-plan 同步跑批计划表格；web 启动维护页面"
         ),
+    )
+    parser.add_argument(
+        "plan_file",
+        nargs="?",
+        help="import-plan 读取的跑批计划表格（.xlsx），如 tmp/UAT2主环境及长周期批量计划.xlsx",
+    )
+    parser.add_argument(
+        "--sheet",
+        default=DEFAULT_SHEET,
+        help=f"import-plan 读取的工作表，默认 {DEFAULT_SHEET}",
+    )
+    parser.add_argument("--category", help="import-plan 写入的分类，默认取工作表名")
+    parser.add_argument(
+        "--past",
+        choices=PAST_MODES,
+        default="skip",
+        help="import-plan 对今天之前批次的处理：skip 跳过（默认），archive 按已完成归档",
+    )
+    parser.add_argument("--today", help="import-plan 用指定的 YYYY-MM-DD 代替今天，便于自测")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="import-plan 只打印将要发生的改动，不写库",
+    )
+    parser.add_argument(
+        "--keep-source-holiday-flag",
+        action="store_true",
+        help="import-plan 把表格里的节假日标志原样写进 holiday_flag（默认只记进说明，避免影响提醒日历）",
     )
     parser.add_argument("--host", default="127.0.0.1", help="web 命令监听地址")
     parser.add_argument("--port", type=int, default=5000, help="web 命令监听端口")
@@ -55,6 +95,10 @@ def main() -> None:
 
     settings = load_settings()
     _init(settings)
+
+    if args.command == "import-plan":
+        _import_plan(settings, args)
+        return
 
     if args.command == "web":
         from qwbot.web import create_app
@@ -86,6 +130,50 @@ def main() -> None:
         return
 
     _schedule(settings)
+
+
+def _import_plan(settings: Settings, args: argparse.Namespace) -> None:
+    """Sync one worksheet of an exported batch-plan workbook into `batch_plan`."""
+    if not args.plan_file:
+        raise SystemExit(
+            "import-plan 需要指定表格路径，例如："
+            "python -m qwbot.cli import-plan tmp/UAT2主环境及长周期批量计划.xlsx"
+        )
+    path = Path(args.plan_file)
+    if not path.exists():
+        raise SystemExit(f"找不到跑批计划表格：{path}")
+    today = _today_from_args(args.today, settings.timezone)
+    try:
+        summary = import_plan_file(
+            settings.db_path,
+            path,
+            sheet=args.sheet,
+            category=args.category,
+            past=args.past,
+            today=today,
+            dry_run=args.dry_run,
+            keep_source_holiday_flag=args.keep_source_holiday_flag,
+        )
+    except XlsxError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    print(summary.as_text())
+    if args.dry_run:
+        return
+    context = daily_batch_context(load_status_file(settings.db_path)["batch_plan"], today)
+    print(
+        f"{today.isoformat()} 当日批开始时间：{context.start_times}　"
+        f"当日批后会计日期：{context.post_accounting_date}"
+    )
+
+
+def _today_from_args(value: str | None, timezone: str) -> date:
+    if not value:
+        return datetime.now(ZoneInfo(timezone)).date()
+    try:
+        return date.fromisoformat(value.strip())
+    except ValueError:
+        raise SystemExit(f"--today 需要 YYYY-MM-DD 格式，收到：{value}") from None
 
 
 def _init(settings: Settings) -> None:
@@ -128,10 +216,10 @@ def _render_plan(
     plan: list[dict[str, Any]],
     payload: dict[str, Any],
 ) -> list[tuple[dict[str, Any], str]]:
-    next_batch = _next_active_batch(payload["batch_plan"])
     template_vars = payload.get("template_vars", [])
+    batch_plan = payload["batch_plan"]
     return [
-        (entry, render_message_template(settings, entry, template_vars, next_batch))
+        (entry, render_message_template(settings, entry, template_vars, batch_plan=batch_plan))
         for entry in plan
     ]
 
@@ -178,12 +266,16 @@ def _preview_templates_without_schedule(
     if not templates:
         print("没有可预览的消息模板，请先在维护页面 /notifications 新建。")
         return
-    next_batch = _next_active_batch(payload["batch_plan"])
     for template in templates:
         state = "启用" if template["is_enabled"] else "停用"
         print(f"=== {template['name']} · {state} · 暂无启用的通知时间 ===")
         print(
-            render_message_template(settings, template, payload.get("template_vars", []), next_batch)
+            render_message_template(
+                settings,
+                template,
+                payload.get("template_vars", []),
+                batch_plan=payload["batch_plan"],
+            )
         )
         print()
 
@@ -226,12 +318,14 @@ def _send_now(settings: Settings, webhook: dict[str, Any] | None, template_id: i
     url = resolve_webhook_url(target, settings)
     if not url:
         raise SystemExit("选中的群机器人没有配置 webhook 地址，请在维护页面填写。")
-    next_batch = _next_active_batch(payload["batch_plan"])
     client = WeComWebhookClient(url)
     name = target.get("name") if target else "默认群机器人"
     for template in templates:
         message = render_message_template(
-            settings, template, payload.get("template_vars", []), next_batch
+            settings,
+            template,
+            payload.get("template_vars", []),
+            batch_plan=payload["batch_plan"],
         )
         client.send_markdown(message)
         print(f"Sent template '{template['name']}' to {name}.")
@@ -297,7 +391,7 @@ def _send_due_notifications(
     # Keep only today's sent markers so long-running schedulers do not grow unbounded.
     sent_keys.intersection_update({key for key in sent_keys if key.startswith(today_text)})
 
-    next_batch = _next_active_batch(payload["batch_plan"])
+    batch_plan = payload["batch_plan"]
     template_vars = payload.get("template_vars", [])
     dispatched = 0
 
@@ -315,7 +409,7 @@ def _send_due_notifications(
                 f"({today_text} date rule)."
             )
             continue
-        message = render_message_template(settings, entry, template_vars, next_batch)
+        message = render_message_template(settings, entry, template_vars, batch_plan=batch_plan)
         if _send_markdown(settings, entry, message):
             dispatched += 1
 
@@ -350,13 +444,6 @@ def should_dispatch(
     if date_rule == "holiday_only":
         return not is_holiday(batch_plan, today)
     return is_business_day(batch_plan, today)
-
-
-def _next_active_batch(batch_plan: list[dict[str, str]]) -> dict[str, str] | None:
-    return next(
-        (item for _, item in active_batch_items(batch_plan) if not is_completed(item)),
-        None,
-    )
 
 
 if __name__ == "__main__":

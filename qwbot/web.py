@@ -16,7 +16,6 @@ from qwbot.message import (
     render_message_template,
 )
 from qwbot.planner import (
-    active_batch_items,
     is_business_day,
     is_completed,
     next_batch_after,
@@ -35,6 +34,7 @@ from qwbot.store import (
     add_template_schedule,
     add_template_var,
     add_webhook,
+    batch_event_notify_enabled,
     check_duplicate_var_value,
     close_open_block,
     delete_item,
@@ -58,6 +58,7 @@ from qwbot.store import (
     load_webhook_tree,
     resolve_default_webhook_url,
     resolve_webhook_url,
+    set_batch_event_notify,
     set_default_webhook,
     set_template_date_override,
     toggle_message_template,
@@ -131,6 +132,7 @@ def create_app(settings: Settings) -> Flask:
             today=_today_iso(settings.timezone),
             view=view,
             status_file=_display_path(status_file),
+            batch_notify_enabled=batch_event_notify_enabled(status_file),
         )
 
     @app.get("/notifications")
@@ -154,9 +156,10 @@ def create_app(settings: Settings) -> Flask:
             date_rule_labels=DATE_RULE_LABELS,
             webhook_targets=WEBHOOK_FORM_TARGETS,
             webhook_target_labels=WEBHOOK_TARGET_LABELS,
+            batch_notify_enabled=batch_event_notify_enabled(status_file),
             # Real values so the in-page preview matches what would be sent.
             preview_variables=build_template_variables(
-                settings, _next_active_batch(payload), payload.get("template_vars", [])
+                settings, None, payload.get("template_vars", []), payload["batch_plan"]
             ),
         )
 
@@ -213,7 +216,11 @@ def create_app(settings: Settings) -> Flask:
         item["started_on"] = _today_iso(settings.timezone)
         item["started_at"] = _now_iso(settings.timezone)
         update_item(status_file, "batch_plan", index, item)
-        _send_batch_notice(settings, status_file, build_batch_start_notice(item), mention_all=True)
+        # 一天多批时不再逐个批推送；开关在 /notifications 页面维护，默认关闭。
+        if batch_event_notify_enabled(status_file):
+            _send_batch_notice(
+                settings, status_file, build_batch_start_notice(item), mention_all=True
+            )
         return redirect(url_for("index"))
 
     @app.post("/items/batch_plan/<int:index>/complete")
@@ -231,11 +238,12 @@ def create_app(settings: Settings) -> Flask:
         item["execution_seconds"] = str(_duration_seconds(item.get("started_at"), item["completed_at"]))
         next_entry = next_batch_after(payload["batch_plan"], index)
         update_item(status_file, "batch_plan", index, item)
-        _send_batch_notice(
-            settings,
-            status_file,
-            build_batch_complete_notice(item, next_entry[1] if next_entry else None),
-        )
+        if batch_event_notify_enabled(status_file):
+            _send_batch_notice(
+                settings,
+                status_file,
+                build_batch_complete_notice(item, next_entry[1] if next_entry else None),
+            )
         return redirect(url_for("index"))
 
     @app.post("/items/batch_plan/<int:index>/close-block")
@@ -253,6 +261,20 @@ def create_app(settings: Settings) -> Flask:
     # ------------------------------------------------------------------
     # Webhooks (QWB-002): webhook -> message template -> notification time
     # ------------------------------------------------------------------
+
+    @app.post("/batch-event-notify")
+    def update_batch_event_notify():
+        """Switch the per-batch 开始/完成 push; the day's times go out with the templates."""
+        enabled = _flag("enabled")
+        set_batch_event_notify(status_file, enabled)
+        return _notification_redirect(
+            notice=(
+                "已开启批量开始/完成即时通知"
+                if enabled
+                else "已关闭批量开始/完成即时通知，当日批开始时间和批后日期由消息模板变量播报"
+            ),
+            anchor="batch-event-notify",
+        )
 
     @app.post("/webhooks")
     def create_webhook():
@@ -484,7 +506,10 @@ def create_app(settings: Settings) -> Flask:
         if "at_all" in request.form:
             preview["at_all"] = _flag("at_all")
         message = render_message_template(
-            settings, preview, payload.get("template_vars", []), _next_active_batch(payload)
+            settings,
+            preview,
+            payload.get("template_vars", []),
+            batch_plan=payload["batch_plan"],
         )
         try:
             WeComWebhookClient(url).send_markdown(message)
@@ -673,13 +698,6 @@ def _send_batch_notice(
         client.send_text(message, mentioned_list=["@all"])
     else:
         client.send_text(message)
-
-
-def _next_active_batch(payload: dict[str, Any]) -> dict[str, str] | None:
-    return next(
-        (item for _, item in active_batch_items(payload["batch_plan"]) if not is_completed(item)),
-        None,
-    )
 
 
 def mask_webhook_url(url: str) -> str:

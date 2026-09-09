@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shlex
 import subprocess
 import sys
@@ -34,6 +35,7 @@ DEV_KEY = "MOCKDEV0001"
 PROD_KEY = "MOCKPROD0001"
 TEST_KEY = "MOCKTEST0001"
 BROKEN_KEY = "FAILDEV0001"
+BATCH_KEY = "MOCKBATCH001"
 SEND_TIME = "23:58"
 EXTRA_TIME = "23:59"
 
@@ -331,6 +333,128 @@ def run(h: Harness) -> None:
     _, location = h.post(f"/webhooks/{int(only['id'])}/delete")
     check("deletion is refused", "至少需要保留一个群机器人" in location, location)
     check("one webhook is still there", store.count_webhooks(h.db_path) == 1)
+
+    step("13. one day with several batches is announced once, per batch only on demand")
+    # “今天”以服务端为准，跨时区/跨零点都不会写死日期。
+    match = re.search(r'name="natural_date" value="(\d{4}-\d{2}-\d{2})"', h.get("/"))
+    check("the plan page reports today", match is not None)
+    today = match.group(1) if match else ""
+
+    h.post(
+        "/webhooks",
+        {
+            "name": "跑批群",
+            "url": h.mock_webhook_url(BATCH_KEY),
+            "target": "custom",
+            "is_enabled": "true",
+        },
+    )
+    batch_webhook_id = int(
+        next(item for item in store.list_webhooks(h.db_path) if item["name"] == "跑批群")["id"]
+    )
+    h.post(f"/webhooks/{batch_webhook_id}/set-default")
+    check(
+        "the batch robot is the default one",
+        int(store.get_default_webhook(h.db_path)["id"]) == batch_webhook_id,
+    )
+
+    for start_time, current_date, next_date, description in (
+        ("10:30", "2026-01-14", "2026-01-15", "日终计提"),
+        ("15:30", "2026-01-15", "2026-01-31", "月末"),
+    ):
+        h.post(
+            "/items/batch_plan",
+            {
+                "natural_date": today,
+                "batch_start_time": start_time,
+                "current_accounting_date": current_date,
+                "next_accounting_date": next_date,
+                "description": description,
+                "holiday_flag": "N",
+                "execution_status": "待执行",
+            },
+        )
+    batches = sorted(
+        store.load_status_file(h.db_path)["batch_plan"],
+        key=lambda item: item["batch_start_time"],
+    )
+    check("two batches were registered for today", len(batches) == 2, str(batches))
+
+    h.post(
+        f"/webhooks/{batch_webhook_id}/templates",
+        {
+            "name": "当日批量",
+            "content": (
+                "当日批开始时间：{today_batch_start_times}\n"
+                "当日批后会计日期：{today_post_batch_date}\n"
+                "当前交易日：{current_trading_date}\n"
+                "明细：\n{today_batch_detail}"
+            ),
+            "date_rule": "all",
+            "is_enabled": "true",
+            "send_time": SEND_TIME,
+        },
+    )
+    daily_template_id = int(
+        next(
+            item
+            for item in store.list_message_templates(h.db_path, batch_webhook_id)
+            if item["name"] == "当日批量"
+        )["id"]
+    )
+
+    h.mock_reset()
+    h.post(f"/templates/{daily_template_id}/test-send", data={})
+    content = h.mock_messages(BATCH_KEY)[0]["content"]
+    check("both start times are announced", "10:30、15:30" in content, content)
+    check("the post-batch date is the last batch's", "当日批后会计日期：2026-01-31" in content, content)
+    check("the current trading date is the first batch's", "当前交易日：2026-01-14" in content, content)
+    check(
+        "every batch is listed with its own dates",
+        "15:30 月末（2026-01-15 → 2026-01-31）" in content,
+        content,
+    )
+
+    first_index = int(batches[0]["id"])
+    h.mock_reset()
+    h.post(f"/items/batch_plan/{first_index}/start")
+    check("starting a batch does not push by default", h.mock_messages(BATCH_KEY) == [])
+    check(
+        "the status still moves on",
+        store.get_item(h.db_path, "batch_plan", first_index)["execution_status"] == "进行中",
+    )
+    check("the plan page says so", "不会推送消息" in h.get("/"))
+
+    _, location = h.post("/batch-event-notify", {"enabled": "true"})
+    check("the switch reports the new state", "已开启" in location, location)
+    check("it is stored in the database", store.batch_event_notify_enabled(h.db_path) is True)
+
+    h.mock_reset()
+    h.post(f"/items/batch_plan/{first_index}/complete")
+    messages = h.mock_messages(BATCH_KEY)
+    check("completing a batch pushes once enabled", len(messages) == 1, str(messages))
+    check("it is the completion notice", "批量完成通知" in messages[0]["content"], str(messages))
+    check("it names the next batch of the day", "月末" in messages[0]["content"], str(messages))
+
+    h.post("/batch-event-notify", {"enabled": ""})
+    check(
+        "the switch can be turned off again",
+        store.batch_event_notify_enabled(h.db_path) is False,
+    )
+    h.mock_reset()
+    h.post(f"/items/batch_plan/{int(batches[1]['id'])}/start")
+    check("starting the second batch stays silent", h.mock_messages(BATCH_KEY) == [])
+
+    h.mock_reset()
+    code, out = h.cli("run-scheduled-once", "--at", SEND_TIME)
+    check("the daily template is dispatched", code == 0, out)
+    dispatched = h.mock_messages(BATCH_KEY)
+    check("exactly one daily message went out", len(dispatched) == 1, str(dispatched))
+    check(
+        "it carries the day's batch times",
+        "10:30、15:30" in dispatched[0]["content"],
+        str(dispatched),
+    )
 
 
 def main() -> int:

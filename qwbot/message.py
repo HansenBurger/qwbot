@@ -4,7 +4,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from qwbot.config import Settings
-from qwbot.planner import batch_title
+from qwbot.planner import batch_title, daily_batch_context
 
 SETTINGS_URL_VARS = (
     ("progress_doc_link", "progress_doc_url"),
@@ -26,16 +26,37 @@ def build_template_variables(
     settings: Settings,
     next_batch: dict[str, str] | None,
     template_vars: list[dict[str, str]] | None = None,
+    batch_plan: list[dict[str, str]] | None = None,
 ) -> dict[str, str]:
-    """System variables merged with DB-managed document link variables."""
+    """System variables merged with DB-managed document link variables.
+
+    传入 `batch_plan` 时按“当日口径”取数：一天多批时 `today_batch_start_times`
+    列出当天全部批次的开始时间，`today_post_batch_date` 是当天最后一批的批后会计
+    日期；`current_trading_date` / `next_trading_date` 也跟着当天走，不会再被没执行
+    的历史计划带偏。没传 `batch_plan` 时沿用 `next_batch` 单个批量的口径（CLI 和
+    旧调用方仍然可用）。
+    """
     from qwbot.store import DEFAULT_TEMPLATE_VARS
 
     now = datetime.now(ZoneInfo(settings.timezone))
-    variables = {
-        "title_date": now.strftime("%m月%d日"),
-        "current_trading_date": _batch_current_date(next_batch),
-        "next_trading_date": _batch_next_date(next_batch),
-    }
+    context = daily_batch_context(batch_plan, now.date()) if batch_plan is not None else None
+    if context is None:
+        batch_variables = {
+            "current_trading_date": _batch_current_date(next_batch),
+            "next_trading_date": _batch_next_date(next_batch),
+            "today_batch_start_times": "无",
+            "today_post_batch_date": "无",
+            "today_batch_detail": "无",
+        }
+    else:
+        batch_variables = {
+            "current_trading_date": context.current_accounting_date,
+            "next_trading_date": context.next_trading_date,
+            "today_batch_start_times": context.start_times,
+            "today_post_batch_date": context.post_accounting_date,
+            "today_batch_detail": context.detail,
+        }
+    variables = {"title_date": now.strftime("%m月%d日"), **batch_variables}
     fallback_urls = settings_url_map(settings)
     if template_vars:
         for var in template_vars:
@@ -55,6 +76,7 @@ def render_message_template(
     template: dict[str, object] | str | None,
     template_vars: list[dict[str, str]] | None = None,
     next_batch: dict[str, str] | None = None,
+    batch_plan: list[dict[str, str]] | None = None,
 ) -> str:
     """Render one webhook message template.
 
@@ -75,7 +97,7 @@ def render_message_template(
     if not content.strip():
         content = DEFAULT_REMINDER_TEMPLATE
 
-    variables = build_template_variables(settings, next_batch, template_vars)
+    variables = build_template_variables(settings, next_batch, template_vars, batch_plan)
     rendered = content
     for key, value in variables.items():
         rendered = rendered.replace("{" + key + "}", value)
@@ -96,9 +118,10 @@ def build_scheduled_reminder(
     next_batch: dict[str, str] | None,
     template: str | None = None,
     template_vars: list[dict[str, str]] | None = None,
+    batch_plan: list[dict[str, str]] | None = None,
 ) -> str:
     """Compatibility entry point kept for the CLI and existing callers."""
-    return render_message_template(settings, template, template_vars, next_batch)
+    return render_message_template(settings, template, template_vars, next_batch, batch_plan)
 
 
 def build_batch_start_notice(item: dict[str, str]) -> str:

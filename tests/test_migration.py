@@ -338,3 +338,119 @@ def test_migration_without_legacy_rows_still_creates_a_working_template(
         "09:00",
         "18:00",
     ]
+
+
+# ---------------------------------------------------------------------------
+# QWB-002 定稿前的试验版：webhooks 用 env/enabled，template_schedules 带
+# weekdays/legacy_id 且外键指向 reminder_templates。老库必须还能打开。
+# ---------------------------------------------------------------------------
+
+PRE_RELEASE_WEBHOOK_DDL = """
+CREATE TABLE webhooks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL DEFAULT '',
+    url TEXT NOT NULL DEFAULT '',
+    env TEXT NOT NULL DEFAULT 'prod',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    is_default INTEGER NOT NULL DEFAULT 0,
+    remark TEXT NOT NULL DEFAULT '',
+    last_status TEXT NOT NULL DEFAULT '',
+    last_detail TEXT NOT NULL DEFAULT '',
+    last_checked_at TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT ''
+)
+"""
+PRE_RELEASE_SCHEDULE_DDL = """
+CREATE TABLE template_schedules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    template_id INTEGER NOT NULL,
+    send_time TEXT NOT NULL DEFAULT '',
+    date_rule TEXT NOT NULL DEFAULT 'business_day',
+    weekdays TEXT NOT NULL DEFAULT '',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    legacy_id TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT '',
+    FOREIGN KEY (template_id) REFERENCES reminder_templates(id) ON DELETE CASCADE
+)
+"""
+PRE_RELEASE_OVERRIDE_DDL = """
+CREATE TABLE template_date_overrides (
+    template_id INTEGER NOT NULL,
+    target_date TEXT NOT NULL DEFAULT '',
+    mode TEXT NOT NULL DEFAULT 'include',
+    created_at TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (template_id, target_date),
+    FOREIGN KEY (template_id) REFERENCES reminder_templates(id) ON DELETE CASCADE
+)
+"""
+
+
+def seed_pre_release_webhook_model(connection: sqlite3.Connection) -> None:
+    connection.execute(PRE_RELEASE_WEBHOOK_DDL)
+    connection.execute(PRE_RELEASE_SCHEDULE_DDL)
+    connection.execute(PRE_RELEASE_OVERRIDE_DDL)
+    connection.execute(
+        "INSERT INTO webhooks (name, url, env, enabled, is_default, remark, created_at, updated_at)"
+        " VALUES (?, ?, 'test', 1, 1, '由 .env 自动导入', ?, ?)",
+        ("自测群机器人", MOCK_TEST_URL, NOW, NOW),
+    )
+    connection.execute(
+        "INSERT INTO webhooks (name, url, env, enabled, is_default, remark, created_at, updated_at)"
+        " VALUES (?, ?, 'prod', 0, 0, '', ?, ?)",
+        ("生产群机器人", MOCK_PROD_URL, NOW, NOW),
+    )
+    connection.execute(
+        "INSERT INTO template_schedules"
+        " (template_id, send_time, date_rule, weekdays, enabled, legacy_id, created_at, updated_at)"
+        " VALUES (1, '09:00', 'business_day', '', 1, 'morning-reminder', ?, ?)",
+        (NOW, NOW),
+    )
+    connection.execute(
+        "INSERT INTO template_date_overrides (template_id, target_date, mode, created_at)"
+        " VALUES (1, '2026-10-05', 'include', ?)",
+        (NOW,),
+    )
+    connection.commit()
+
+
+def test_pre_release_webhook_schema_is_upgraded_on_open(
+    db_path: Path, legacy_db: sqlite3.Connection
+) -> None:
+    seed_legacy(legacy_db)
+    seed_pre_release_webhook_model(legacy_db)
+    legacy_db.close()
+
+    init_db(db_path, make_settings(db_path))
+
+    webhooks = store.list_webhooks(db_path)
+    assert [item["target"] for item in webhooks] == ["test", "prod"]
+    assert [item["is_enabled"] for item in webhooks] == [True, False]
+    default = store.get_default_webhook(db_path)
+    assert default is not None and default["url"] == MOCK_TEST_URL
+
+    # 旧的通知时间行指向 reminder_templates，由迁移按 scheduler_times / notification_tasks 重建。
+    assert [item["send_time"] for item in store.list_template_schedules(db_path)] == [
+        "08:00",
+        "09:00",
+        "12:30",
+        "17:30",
+        "18:00",
+    ]
+    assert store.load_dispatch_plan(db_path)
+
+    with sqlite3.connect(db_path) as connection:
+        sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'template_schedules'"
+        ).fetchone()[0]
+    assert "message_templates" in sql and "reminder_templates" not in sql
+
+
+def test_healthy_database_is_left_alone(db_path: Path) -> None:
+    init_db(db_path, make_settings(db_path))
+    before = store.load_webhook_tree(db_path)
+
+    init_db(db_path, make_settings(db_path))
+
+    assert store.load_webhook_tree(db_path) == before
