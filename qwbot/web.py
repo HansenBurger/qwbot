@@ -12,6 +12,7 @@ from qwbot.config import Settings
 from qwbot.message import (
     build_batch_complete_notice,
     build_batch_start_notice,
+    build_template_variables,
     render_message_template,
 )
 from qwbot.planner import (
@@ -153,6 +154,10 @@ def create_app(settings: Settings) -> Flask:
             date_rule_labels=DATE_RULE_LABELS,
             webhook_targets=WEBHOOK_FORM_TARGETS,
             webhook_target_labels=WEBHOOK_TARGET_LABELS,
+            # Real values so the in-page preview matches what would be sent.
+            preview_variables=build_template_variables(
+                settings, _next_active_batch(payload), payload.get("template_vars", [])
+            ),
         )
 
     @app.post("/items/<collection>")

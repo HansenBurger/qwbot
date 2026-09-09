@@ -255,6 +255,29 @@ document.addEventListener("input", (event) => {
   }
 });
 
+// Variable values for the template preview. The server renders the real ones
+// into #template-preview-vars; the fallbacks only cover the case where the
+// element is missing (e.g. the page was opened from a stale cache).
+function previewVariables() {
+  const fallback = {
+    title_date: "01月15日",
+    current_trading_date: "2026-01-14",
+    next_trading_date: "2026-01-15",
+    progress_doc_link: "https://doc.weixin.qq.com/sheet/example-progress",
+    case_assignment_doc_link: "https://doc.weixin.qq.com/sheet/example-cases",
+    batch_register_doc_link: "https://doc.weixin.qq.com/sheet/example-batch",
+    agenda_doc_link: "https://doc.weixin.qq.com/sheet/example-agenda",
+    frontend_link: "http://127.0.0.1:5000",
+  };
+  const node = document.getElementById("template-preview-vars");
+  if (!node) return fallback;
+  try {
+    return { ...fallback, ...JSON.parse(node.textContent || "{}") };
+  } catch (_) {
+    return fallback;
+  }
+}
+
 // Template Preview Handler
 (function() {
   document.addEventListener("click", (event) => {
@@ -281,17 +304,8 @@ document.addEventListener("input", (event) => {
   
   function renderWeComMarkdown(text) {
     // Replace template variables with sample values
-    const sampleValues = {
-      "title_date": "01月15日",
-      "progress_doc_url": "[进度文档](https://example.com/progress)",
-      "case_assignment_doc_url": "[用例分配](https://example.com/cases)",
-      "batch_register_doc_url": "[批次登记](https://example.com/batch)",
-      "agenda_doc_url": "[议程安排](https://example.com/agenda)",
-      "frontend_url": "[前端登记](https://example.com/frontend)"
-    };
-    
     let processed = text;
-    for (const [key, value] of Object.entries(sampleValues)) {
+    for (const [key, value] of Object.entries(previewVariables())) {
       const regex = new RegExp("\\{" + key + "\\}", "g");
       processed = processed.replace(regex, value);
     }

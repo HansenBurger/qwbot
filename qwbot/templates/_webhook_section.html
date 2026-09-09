@@ -228,6 +228,9 @@
   {% endfor %}
 {% endfor %}
 
+{# Real variable values for the client-side preview; `tojson` escapes </script> safely. #}
+<script type="application/json" id="template-preview-vars">{{ preview_variables | tojson }}</script>
+
 <dialog class="modal" id="template-preview-modal">
   <div class="modal-card template-preview-card">
     <div class="modal-header">
