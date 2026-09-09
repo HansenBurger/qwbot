@@ -273,6 +273,14 @@ sh scripts/local-deploy.sh reset-db    # 停容器并删库，下次 deploy 按 
 - `QWBOT_PORT` 被其他进程占用时自动往后找空闲端口，并同步改写 `.env` 里的 `QWBOT_PORT` 和 `FRONTEND_URL`（与 `scripts/dev.sh` 行为一致）。
 - 自动规避 Docker Desktop 在 WSL 下的凭据助手问题：`~/.docker/config.json` 里的 `credsStore: desktop.exe` 在 Linux 侧无法执行（`exec format error`），会让构建卡在拉取基础镜像。脚本检测到后只在本次运行内改用 `tmp/docker-config`（内容 `{}`），**不会修改你的全局 docker 配置**。设置 `QWBOT_DOCKER_CONFIG_FORCE=1` 可跳过该处理。
 - `status` 会直接读容器内数据库，打印每个机器人的脱敏地址、是否默认/停用，以及每个模板下配置的通知时间，方便确认"页面上改的配置调度器是否已经看到"。
+- `local-deploy.sh` 和 `dev.sh` 用了 bash 数组，Linux 上 `sh` 是 dash 时会先自动用 bash 重新执行自己，所以 README 里的 `sh scripts/...` 写法可以直接用。
+- 基础镜像拉不动时（`registry-1.docker.io` 超时），先从可用的镜像源拉一份再打回原 tag，构建就会直接用本地镜像：
+
+```sh
+docker pull docker.m.daocloud.io/library/python:3.13-slim
+docker tag docker.m.daocloud.io/library/python:3.13-slim python:3.13-slim
+sh scripts/local-deploy.sh deploy
+```
 
 `data/qwbot.sqlite3` 由容器内 root 创建，宿主机一般仍可删除（`data/` 目录属于你）；万一删不掉，`reset-db` 会自动改用一次性容器删除。
 

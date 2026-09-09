@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -eu
 
+# 这两个脚本用了 bash 数组，Linux 上 `sh scripts/xxx.sh` 会落到 dash 并直接语法报错；
+# README 里给的就是 `sh` 调用方式，所以非 bash 时自动用 bash 重新执行自己。
+if [ -z "${BASH_VERSION:-}" ]; then
+  exec bash "$0" "$@"
+fi
+
 # Start QWBot for local Linux/macOS development and testing.
 # Usage:
 #   scripts/dev.sh [command] [test|prod] [port] [host]
