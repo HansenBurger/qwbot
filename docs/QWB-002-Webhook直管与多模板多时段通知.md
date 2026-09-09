@@ -184,6 +184,24 @@
 - `qwbot/web.py`: `start_item` / `complete_item` 改用默认机器人
 - `qwbot/cli.py`: 各命令改用解析函数
 
+### 8. 本地 Docker 部署脚本
+
+**实现逻辑：**
+- 新增 `scripts/local-deploy.sh`，子命令风格与 `scripts/dev.sh` / `scripts/deploy.sh` 一致：`deploy` / `rebuild` / `restart` / `stop` / `logs [service] [N]` / `status` / `url` / `shell` / `dispatch [HH:MM]` / `reset-db`。
+- 与服务器用的 `deploy.sh` 分开：本地不要求 `data/sample_status.json`（空库即可启动，机器人从 `.env` 播种），`.env` 缺失时自动从 `.env.example` 复制。
+- `QWBOT_PORT` 被别的进程占用时自动向后找空闲端口，并同步改写 `.env` 的 `QWBOT_PORT` 和 `FRONTEND_URL`；如果占用者正是本项目容器则复用该端口。
+- `dispatch [HH:MM]` 在 `scheduler` 容器内执行 `run-scheduled-once [--at HH:MM]`，不用等到真实时间点就能验证派发。
+- `status` 直接读容器内数据库，打印每个机器人的脱敏地址、默认/停用状态，以及每个模板下配置的通知时间。
+
+**关键设计：**
+- **自动规避 WSL 下的 Docker 凭据助手故障**：Docker Desktop 在 `~/.docker/config.json` 写入 `credsStore: desktop.exe`，Linux 侧无法执行该 Windows 二进制（`exec format error`），`docker build` 会在拉取基础镜像时直接失败。脚本只在检测到该助手确实无法执行时，为**本次运行**导出 `DOCKER_CONFIG=tmp/docker-config`（内容 `{}`），不修改用户全局配置；`QWBOT_DOCKER_CONFIG_FORCE=1` 可跳过。
+- `reset-db` 优先在宿主机删库，失败（`data/` 目录属于容器内 root）时自动改用一次性容器删除。
+- 镜像信息用 `docker images --format` 而不是 `docker image inspect --format`：启用 containerd 镜像存储后 inspect 返回的结构没有 `Repository` 字段。
+
+**文件改动：**
+- `scripts/local-deploy.sh`: 新增
+- `README.md`: 新增「本地 Docker 部署」章节，并标注 `deploy.sh` 与 `local-deploy.sh` 的分工
+
 ---
 
 ## 3. 技术细节
@@ -327,6 +345,7 @@ with _connect(path) as connection:      # contextmanager 内 commit
 12. **Docker 部署**：`docker compose up -d --build` 后 web + scheduler 两个容器共享 volume，页面上新增机器人后 scheduler 容器无需重启即可按新配置派发。
 13. **自测群真实发送**：使用测试环境 webhook 完成一次真实推送，确认企业微信客户端渲染正确（标题、链接、颜色、`@所有人`）。
 14. **回归**：跑批计划页的登记、修改、归档、阻塞看板、分页筛选功能不受影响。
+15. **本地 Docker 脚本**：`deploy` 幂等、端口被占用时自动改端口并同步 `.env`、`logs` 跟随与按行数一次性输出、`logs scheduler` 只看单个服务、`status` 能读出容器内机器人/模板/时间、`dispatch 09:00` 能在容器内派发、`restart` / `stop` / `reset-db` / `rebuild` 均可正常执行。
 
 ---
 
@@ -383,3 +402,23 @@ sh scripts/selftest.sh          # 92 passed + All 50 self-test assertions passed
 调度器进程在页面改完通知时间后启动，无需重启即按新时间派发；结合前面 Docker 场景（容器运行期间新增机器人后到点自动发送），确认**配置热生效**。
 
 > 真实 key 只存在于 gitignore 忽略的本地 `.env`，提交前已用 `git diff --cached | grep` 全量扫描确认没有进入版本库。
+
+### 本地 Docker 脚本验证
+
+`scripts/local-deploy.sh` 全部子命令实机跑通：
+
+| 命令 | 验证结果 |
+| --- | --- |
+| `status`（未部署） | 提示镜像未构建 / 数据库未创建，不报错 |
+| `deploy` | 自动检测并绕过 `credsStore: desktop.exe`，镜像已存在时跳过构建，容器起来后打印访问地址 |
+| `status`（运行中） | 读出容器内数据库：2 个机器人（默认标记正确）、脱敏地址、`组内重点工作提醒: 09:00, 18:00` |
+| `url` | 打印两个地址并探测到 `HTTP 200` |
+| `logs 8` / `logs scheduler 5` | 一次性输出指定行数；按服务过滤生效 |
+| `dispatch` | 当前时间无到点任务，不发送 |
+| `dispatch 09:00` | `Sent: 自测群机器人 / 组内重点工作提醒 at 09:00.`，mock 收到 markdown |
+| `restart` | 两个容器重启成功 |
+| `reset-db` | 停容器 + 删库（root 属主文件在用户自有目录下可直接删，容器兜底路径保留） |
+| `deploy`（第二次） | 幂等，重新按 `.env` 播种 |
+| 端口占用 | 5000 被 `python -m http.server` 占用时自动改用 5001，`.env` 的 `QWBOT_PORT` 与 `FRONTEND_URL` 同步更新，容器映射 `0.0.0.0:5001->5000` |
+| `rebuild` | `--no-cache` 全量重建 + `--force-recreate`，重建后 `url` 与 `dispatch 09:00` 均正常 |
+| `stop` | 容器与网络移除，`.env` 和 `data/` 保留 |

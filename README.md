@@ -196,6 +196,38 @@ curl -X POST http://127.0.0.1:8089/__reset # 清空
 
 真实自测群验证：把 `.env` 里的 `WECOM_WEBHOOK_URL_TEST` 换成测试群机器人的真实地址，启动后在页面上对该机器人点“测试连通性”，再对模板点“测试发送”。
 
+## 本地 Docker 部署
+
+本地用 Docker 跑整套服务（web + scheduler），用 `scripts/local-deploy.sh`，子命令风格和 `scripts/dev.sh` 一致：
+
+```sh
+sh scripts/local-deploy.sh deploy      # 构建镜像（已存在则跳过）并启动，幂等
+sh scripts/local-deploy.sh rebuild     # 不用缓存重新构建并重建容器
+sh scripts/local-deploy.sh restart     # 只重启容器，不重新构建
+sh scripts/local-deploy.sh stop        # 停止并移除容器，保留 .env 和 data/
+sh scripts/local-deploy.sh logs        # 跟随 web + scheduler 日志
+sh scripts/local-deploy.sh logs 50     # 只打印最后 50 行后退出
+sh scripts/local-deploy.sh logs scheduler 50
+sh scripts/local-deploy.sh status      # 容器/镜像/端口/数据库 + 机器人、模板、通知时间概览
+sh scripts/local-deploy.sh url         # 打印访问地址并探测连通性
+sh scripts/local-deploy.sh shell       # 进入 web 容器
+sh scripts/local-deploy.sh dispatch    # 在容器内手动执行一次定时派发
+sh scripts/local-deploy.sh dispatch 09:00   # 用 09:00 代替当前时间，模拟到点
+sh scripts/local-deploy.sh reset-db    # 停容器并删库，下次 deploy 按 .env 重新播种
+```
+
+和服务器用的 `scripts/deploy.sh` 的区别：
+
+- 不要求 `data/sample_status.json`。本地空库即可启动，机器人会从 `.env` 播种，跑批计划在页面上登记。
+- `.env` 不存在时自动从 `.env.example` 复制，之后可以先启动、再到 `/notifications` 页面新增真实机器人。
+- `QWBOT_PORT` 被其他进程占用时自动往后找空闲端口，并同步改写 `.env` 里的 `QWBOT_PORT` 和 `FRONTEND_URL`（与 `scripts/dev.sh` 行为一致）。
+- 自动规避 Docker Desktop 在 WSL 下的凭据助手问题：`~/.docker/config.json` 里的 `credsStore: desktop.exe` 在 Linux 侧无法执行（`exec format error`），会让构建卡在拉取基础镜像。脚本检测到后只在本次运行内改用 `tmp/docker-config`（内容 `{}`），**不会修改你的全局 docker 配置**。设置 `QWBOT_DOCKER_CONFIG_FORCE=1` 可跳过该处理。
+- `status` 会直接读容器内数据库，打印每个机器人的脱敏地址、是否默认/停用，以及每个模板下配置的通知时间，方便确认"页面上改的配置调度器是否已经看到"。
+
+`data/qwbot.sqlite3` 由容器内 root 创建，宿主机一般仍可删除（`data/` 目录属于你）；万一删不掉，`reset-db` 会自动改用一次性容器删除。
+
+改完代码想让容器生效用 `rebuild`；只改了页面上的机器人/模板/通知时间**什么都不用做**，scheduler 每 30 秒重读数据库。
+
 ## Linux Docker 部署
 
 服务器部署时不要把 `data/sample_status.json` 或 `data/qwbot.sqlite3` 打进镜像，也不要提交到 Git。旧 JSON 可由你手动上传到服务器项目目录的 `data/sample_status.json`，容器首次启动会迁移到同一 volume 下的 SQLite 数据库。
@@ -226,7 +258,7 @@ mkdir -p data
 scp sample_status.json user@your-server:/path/to/QWBot/data/sample_status.json
 ```
 
-1. 构建并启动：
+1. 构建并启动（服务器部署用 `deploy.sh`，本地开发用上面的 `local-deploy.sh`）：
 
 ```sh
 sh scripts/deploy.sh
