@@ -106,7 +106,7 @@
   3. 替换 `{var_name}` 占位符；
   4. `at_all=true` 且正文里没有 `<@all>` 时自动追加。
 - `build_scheduled_reminder` 保留为兼容入口，内部委托给 `render_message_template`。
-- `build_custom_notification` 保留（CLI 老命令和回归测试仍在用），但调度链路不再调用。
+- 旧的 `build_custom_notification` 已从生产代码移除（调度链路不再调用）。它的实现被**冻结**在 `tests/test_migration.py` 的 `legacy_build_custom_notification()` 里，作为迁移输出的黄金参照，确保迁移后的模板渲染结果与旧版逐字一致。
 
 **关键设计：**
 - 固定提醒和自定义通知共用同一个渲染器，模板能力对等，不再区分"系统模板"和"自定义通知"两套逻辑。
@@ -201,6 +201,38 @@
 **文件改动：**
 - `scripts/local-deploy.sh`: 新增
 - `README.md`: 新增「本地 Docker 部署」章节，并标注 `deploy.sh` 与 `local-deploy.sh` 的分工
+
+### 9. 死文件与死代码清理
+
+改造完成后做了一次全量引用扫描（模板 include 关系、Python 顶层符号跨文件引用、`data-*` 钩子与元素对应关系、脚本与文档引用），删除已经没有调用方的文件和函数。
+
+**删除的文件：**
+
+| 文件 | 原因 |
+| --- | --- |
+| `qwbot/sources.py` | 唯一入口 `load_reminder_data()` 无调用方；`ReminderData` 只被 `build_daily_reminder()` 使用 |
+| `qwbot/templates/_section.html` | 没有任何 `{% include %}` 引用（早期遗留） |
+| `qwbot/templates/_progress_section.html` | 同上 |
+| `requirements.txt` | 与 `pyproject.toml` 的 `dependencies` 重复，Dockerfile 用的是 `pip install .`，无人读取，容易与 pyproject 漂移 |
+
+**删除的函数：**
+
+- `qwbot/message.py`：`build_daily_reminder`、`build_custom_notification`、`_resolve_doc_url`、`_format_list`、`_format_doc_line`、`_format_doc_link`，以及随之失效的 `import re` 和 `ReminderData` 导入（251 → 158 行）
+- `qwbot/planner.py`：`today_batch_items`、`first_today_batch`、`batch_detail_lines`、`normalize_bool`，以及 `typing.Any` 导入（110 → 77 行）
+- `qwbot/store.py`：`save_status_file`、`add_scheduler_time`、`update_scheduler_time`、`delete_scheduler_time`、`set_notification_date_override`、`get_reminder_template`、`set_reminder_template`、`get_templates`、`get_active_template`、`add_template`、`update_template`、`delete_template`、`set_active_template`（2207 → 2018 行）
+
+**关键设计：**
+- 删除的都是**旧模型的写入/读取入口**。旧表本身（`reminder_templates`、`scheduler_times`、`notification_tasks`、`notification_date_overrides`、`scheduler_skip_dates`、`scheduler_force_dates`）以及迁移读取它们所需的 `_load_*` / `_parse_doc_links` / `NOTIFICATION_FIELDS` 全部保留，回滚仍然是"还原代码"这一个动作。
+- `build_custom_notification` 不是直接删掉了事，而是搬进测试作为黄金参照——迁移正确性需要它，但生产代码不该留一个只有测试会调用的函数。
+- 顺手修了一个存量缺陷：模板预览的 JS 里样例变量名写的是 `progress_doc_url`、`frontend_url` 等，与真实的 `progress_doc_link`、`frontend_link` 不一致，也缺 `current_trading_date` / `next_trading_date`，导致「预览效果」里的文档链接和交易日**一直显示为原始占位符**。现在由服务端把 `build_template_variables()` 的真实取值以 JSON 渲染进页面（`#template-preview-vars`），前端读取后替换，预览与实际发送内容一致；JSON 缺失时回退到内置样例。
+
+**文件改动：**
+- `qwbot/message.py` / `qwbot/planner.py` / `qwbot/store.py`: 删除死函数
+- `qwbot/sources.py`、`qwbot/templates/_section.html`、`qwbot/templates/_progress_section.html`、`requirements.txt`: 删除
+- `qwbot/web.py`: `notification_page` 增加 `preview_variables`
+- `qwbot/templates/_webhook_section.html`: 渲染 `#template-preview-vars` JSON
+- `qwbot/static/app.js`: 预览改用服务端真实变量值
+- `tests/test_migration.py`: 内置 `legacy_build_custom_notification()` 黄金参照
 
 ---
 
@@ -319,9 +351,11 @@ with _connect(path) as connection:      # contextmanager 内 commit
   - 新增：`/webhooks`(POST)、`/webhooks/<id>`(POST)、`/webhooks/<id>/delete`、`/webhooks/<id>/toggle`、`/webhooks/<id>/set-default`、`/webhooks/<id>/test`、`/webhooks/import-env`、`/webhooks/<id>/templates`(POST)、`/templates/<id>`(POST)、`/templates/<id>/delete`、`/templates/<id>/toggle`、`/templates/<id>/duplicate`、`/templates/<id>/test-send`、`/templates/<id>/schedules`(POST)、`/schedules/<id>`(POST)、`/schedules/<id>/delete`、`/schedules/<id>/toggle`、`/templates/<id>/skip-date`、`/templates/<id>/force-date`
   - 下线：`/notifications*`、`/scheduler-times*`、`/reminder-template*`
   - 保留：`/scheduler-skip-dates*`、`/scheduler-force-dates*`、`/template-vars*`、`/items/*`
-- **前端**：`/notifications` 页面结构重构；`_notification_modal.html` 删除，新增 `_webhook_section.html`、`_template_editor_modal.html`。
+- **前端**：`/notifications` 页面结构重构；`_notification_modal.html` 删除，新增 `_webhook_section.html`、`_webhook_modal.html`、`_template_modal.html`、`_schedule_modal.html`。
 - **调度器**：派发逻辑从"两条并行链路（固定提醒 + 自定义通知）"改为"单一三级遍历"；单点失败隔离。
+- **删除**：`qwbot/sources.py`、`qwbot/templates/_section.html`、`qwbot/templates/_progress_section.html`、`requirements.txt` 四个无引用文件，以及 `message.py` / `planner.py` / `store.py` 中 23 个无调用方的函数。
 - **兼容性**：
+  - 依赖清单以 `pyproject.toml` 为唯一来源（`requirements.txt` 已删除，Dockerfile 一直用的是 `pip install .`）；
   - 升级后首次启动自动迁移，无需人工干预；
   - `.env` 未配 `WECOM_WEBHOOK_URL_TEST` 时，"测试发送"退化为发到该模板所属机器人，不再抛异常；
   - 旧数据库文件可直接被新版本打开；

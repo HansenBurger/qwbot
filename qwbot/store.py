@@ -98,20 +98,6 @@ def load_status_file(path: Path) -> dict[str, list[dict[str, Any]]]:
     }
 
 
-def save_status_file(path: Path, payload: dict[str, list[dict[str, Any]]]) -> None:
-    _ensure_schema(path)
-    with _connect(path) as connection:
-        connection.execute("DELETE FROM block_events")
-        connection.execute("DELETE FROM batch_plan")
-        connection.execute("DELETE FROM progress")
-        for item in payload.get("batch_plan", []):
-            _insert_batch(connection, _clean_item(item))
-        for item in payload.get("progress", []):
-            _insert_progress(connection, _clean_item(item))
-        for item in payload.get("notification_tasks", []):
-            _insert_notification_task(connection, _clean_notification_task(item))
-
-
 def add_item(path: Path, collection: str, item: dict[str, str]) -> int:
     _ensure_collection(collection)
     _ensure_schema(path)
@@ -238,52 +224,6 @@ def has_open_block(path: Path, batch_plan_id: int) -> bool:
     return row is not None
 
 
-def update_scheduler_time(path: Path, reminder_id: str, send_time: str) -> None:
-    _ensure_schema(path)
-    with _connect(path) as connection:
-        cursor = connection.execute(
-            """
-            UPDATE scheduler_times
-            SET send_time = ?, updated_at = ?
-            WHERE reminder_id = ?
-            """,
-            (send_time.strip(), _now_iso(), reminder_id),
-        )
-        if cursor.rowcount == 0:
-            connection.execute(
-                """
-                INSERT INTO scheduler_times (reminder_id, send_time, created_at, updated_at)
-                VALUES (?, ?, ?, ?)
-                """,
-                (reminder_id, send_time.strip(), _now_iso(), _now_iso()),
-            )
-
-
-def add_scheduler_time(path: Path, send_time: str) -> None:
-    _ensure_schema(path)
-    now = _now_iso()
-    reminder_id = f"work-reminder-{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
-    with _connect(path) as connection:
-        connection.execute(
-            """
-            INSERT INTO scheduler_times (reminder_id, send_time, created_at, updated_at)
-            VALUES (?, ?, ?, ?)
-            """,
-            (reminder_id, send_time.strip(), now, now),
-        )
-
-
-def delete_scheduler_time(path: Path, reminder_id: str) -> None:
-    _ensure_schema(path)
-    with _connect(path) as connection:
-        cursor = connection.execute(
-            "DELETE FROM scheduler_times WHERE reminder_id = ?",
-            (reminder_id,),
-        )
-        if cursor.rowcount == 0:
-            raise IndexError(f"Scheduler time not found: {reminder_id}")
-
-
 def add_scheduler_skip_date(path: Path, skip_date: str) -> None:
     _ensure_schema(path)
     skip_date = skip_date.strip()
@@ -333,24 +273,6 @@ def delete_scheduler_force_date(path: Path, force_date: str) -> None:
         connection.execute(
             "DELETE FROM scheduler_force_dates WHERE force_date = ?",
             (force_date.strip(),),
-        )
-
-
-def set_notification_date_override(path: Path, notification_task_id: int, target_date: str, mode: str) -> None:
-    _ensure_schema(path)
-    target_date = target_date.strip()
-    if not target_date or mode not in {"skip", "force"}:
-        return
-    now = _now_iso()
-    with _connect(path) as connection:
-        connection.execute(
-            """
-            INSERT INTO notification_date_overrides (notification_task_id, target_date, mode, created_at)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(notification_task_id, target_date)
-            DO UPDATE SET mode = excluded.mode, created_at = excluded.created_at
-            """,
-            (notification_task_id, target_date, mode, now),
         )
 
 
@@ -677,29 +599,6 @@ def _load_scheduler_force_dates(path: Path) -> list[dict[str, str]]:
     ]
 
 
-def get_reminder_template(path: Path) -> str:
-    _ensure_schema(path)
-    with _connect(path) as connection:
-        row = connection.execute(
-            "SELECT value FROM app_settings WHERE key = 'reminder_template'"
-        ).fetchone()
-    if row and row["value"]:
-        return row["value"]
-    return DEFAULT_REMINDER_TEMPLATE
-
-
-def set_reminder_template(path: Path, template: str) -> None:
-    _ensure_schema(path)
-    with _connect(path) as connection:
-        connection.execute(
-            """
-            INSERT INTO app_settings (key, value) VALUES ('reminder_template', ?)
-            ON CONFLICT(key) DO UPDATE SET value = excluded.value
-            """,
-            (template,),
-        )
-
-
 def get_template_vars(path: Path) -> list[dict[str, str]]:
     _ensure_schema(path)
     with _connect(path) as connection:
@@ -748,7 +647,6 @@ def update_template_var(path: Path, var_id: int, var_name: str, var_label: str, 
         )
 
 
-
 def check_duplicate_var_value(path: Path, var_value: str, exclude_id: int | None = None) -> str | None:
     """Check if var_value (URL) is already used by another variable.
     Returns the var_name of the duplicate, or None if not found.
@@ -775,93 +673,6 @@ def delete_template_var(path: Path, var_id: int) -> None:
     with _connect(path) as connection:
         connection.execute("DELETE FROM reminder_template_vars WHERE id = ?", (var_id,))
 
-
-
-
-def get_templates(path: Path) -> list[dict[str, str]]:
-    _ensure_schema(path)
-    with _connect(path) as connection:
-        rows = connection.execute(
-            "SELECT * FROM reminder_templates ORDER BY sort_order, id"
-        ).fetchall()
-    return [
-        {
-            "id": str(row["id"]),
-            "name": _stringify(row["name"]),
-            "template_content": _stringify(row["template_content"]),
-            "is_active": bool(row["is_active"]),
-            "sort_order": int(row["sort_order"]),
-        }
-        for row in rows
-    ]
-
-
-def get_active_template(path: Path) -> str:
-    _ensure_schema(path)
-    with _connect(path) as connection:
-        row = connection.execute(
-            "SELECT template_content FROM reminder_templates WHERE is_active = 1 ORDER BY id LIMIT 1"
-        ).fetchone()
-    if row and row["template_content"]:
-        return row["template_content"]
-    return get_reminder_template(path)
-
-
-def add_template(path: Path, name: str, template_content: str) -> int:
-    _ensure_schema(path)
-    with _connect(path) as connection:
-        max_order = connection.execute(
-            "SELECT COALESCE(MAX(sort_order), -1) FROM reminder_templates"
-        ).fetchone()[0]
-        now = _now_iso()
-        cursor = connection.execute(
-            """
-            INSERT INTO reminder_templates (name, template_content, is_active, sort_order, created_at, updated_at)
-            VALUES (?, ?, 0, ?, ?, ?)
-            """,
-            (name.strip(), template_content.strip(), max_order + 1, now, now),
-        )
-        return int(cursor.lastrowid)
-
-
-def update_template(path: Path, template_id: int, name: str, template_content: str) -> None:
-    _ensure_schema(path)
-    with _connect(path) as connection:
-        connection.execute(
-            """
-            UPDATE reminder_templates
-            SET name = ?, template_content = ?, updated_at = ?
-            WHERE id = ?
-            """,
-            (name.strip(), template_content.strip(), _now_iso(), template_id),
-        )
-
-
-def delete_template(path: Path, template_id: int) -> None:
-    _ensure_schema(path)
-    with _connect(path) as connection:
-        row = connection.execute(
-            "SELECT is_active FROM reminder_templates WHERE id = ?", (template_id,)
-        ).fetchone()
-        connection.execute("DELETE FROM reminder_templates WHERE id = ?", (template_id,))
-        # If deleted template was active, activate the first remaining template
-        if row and row["is_active"]:
-            first = connection.execute(
-                "SELECT id FROM reminder_templates ORDER BY sort_order, id LIMIT 1"
-            ).fetchone()
-            if first:
-                connection.execute(
-                    "UPDATE reminder_templates SET is_active = 1 WHERE id = ?", (first["id"],)
-                )
-
-
-def set_active_template(path: Path, template_id: int) -> None:
-    _ensure_schema(path)
-    with _connect(path) as connection:
-        connection.execute("UPDATE reminder_templates SET is_active = 0")
-        connection.execute(
-            "UPDATE reminder_templates SET is_active = 1 WHERE id = ?", (template_id,)
-        )
 
 # ---------------------------------------------------------------------------
 # Webhook / message template / schedule model (QWB-002)

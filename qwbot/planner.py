@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import Any
 
 
 def active_batch_items(items: list[dict[str, str]]) -> list[tuple[int, dict[str, str]]]:
@@ -11,20 +10,6 @@ def active_batch_items(items: list[dict[str, str]]) -> list[tuple[int, dict[str,
         if not is_archived(item) and not is_completed_from_previous_day(item)
     ]
     return sorted(indexed_items, key=lambda entry: sort_key(entry[1]))
-
-
-def today_batch_items(items: list[dict[str, str]], today: date) -> list[tuple[int, dict[str, str]]]:
-    today_text = today.isoformat()
-    return [
-        entry
-        for entry in active_batch_items(items)
-        if (entry[1].get("natural_date") or entry[1].get("date")) == today_text
-    ]
-
-
-def first_today_batch(items: list[dict[str, str]], today: date) -> tuple[int, dict[str, str]] | None:
-    today_items = today_batch_items(items, today)
-    return today_items[0] if today_items else None
 
 
 def next_batch_after(
@@ -83,24 +68,6 @@ def batch_title(item: dict[str, str] | None) -> str:
     current_date = item.get("current_accounting_date") or "-"
     next_date = item.get("next_accounting_date") or "-"
     return f"{description}，当前交易日 {current_date}，下一交易日 {next_date}"
-
-
-def batch_detail_lines(item: dict[str, str] | None) -> list[str]:
-    if not item:
-        return ["当前自然日暂无跑批计划。"]
-
-    lines = [
-        f"当前批量：{item.get('description') or item.get('content') or '未填写说明'}",
-        f"系统时间：<font color=\"info\">{item.get('current_accounting_date') or '-'}</font>",
-        f"跑完会计时间：<font color=\"info\">{item.get('next_accounting_date') or '-'}</font>",
-    ]
-    if item.get("batch_start_time"):
-        lines.append(f"启动时间：<font color=\"info\">{item['batch_start_time']}</font>")
-    return lines
-
-
-def normalize_bool(value: Any) -> bool:
-    return str(value).lower() in {"true", "1", "yes", "y"}
 
 
 def _item_id(item: dict[str, str], fallback: int) -> int:

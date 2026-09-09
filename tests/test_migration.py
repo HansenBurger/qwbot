@@ -2,12 +2,67 @@
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from pathlib import Path
 
 from qwbot import store
-from qwbot.message import build_custom_notification, render_message_template
+from qwbot.config import Settings
+from qwbot.message import render_message_template, settings_url_map
 from tests.conftest import MOCK_PROD_URL, MOCK_TEST_URL, init_db, make_settings
+
+
+# ---------------------------------------------------------------------------
+# Golden reference: the pre-QWB-002 custom-notification builder.
+#
+# `build_custom_notification()` was removed from production code once the
+# scheduler switched to templates, but the migration has to reproduce its output
+# byte for byte, so the original implementation is frozen here as the expected
+# value. Do not "improve" it.
+# ---------------------------------------------------------------------------
+
+
+def legacy_build_custom_notification(
+    task: dict[str, str],
+    template_vars: list[dict[str, str]] | None = None,
+    settings: Settings | None = None,
+) -> str:
+    title = task.get("title") or "消息通知"
+    lines = [f"【{title}】", "", task.get("content") or ""]
+    doc_links = task.get("doc_links") or []
+    if doc_links:
+        lines.extend(["", "相关文档："])
+        for link in doc_links:
+            label = link.get("label") or "在线文档"
+            url = _legacy_resolve_doc_url(link.get("url") or "", template_vars, settings)
+            lines.append(f"- [{label}]({url})")
+    elif task.get("doc_url"):
+        url = _legacy_resolve_doc_url(task["doc_url"], template_vars, settings)
+        lines.extend(["", "相关文档：", f"- [在线文档]({url})"])
+    if task.get("at_all") == "true":
+        lines.extend(["", "<@all>"])
+    return "\n".join(line for line in lines if line is not None)
+
+
+def _legacy_resolve_doc_url(
+    url: str,
+    template_vars: list[dict[str, str]] | None,
+    settings: Settings | None,
+) -> str:
+    if not url or not url.startswith("{") or not template_vars:
+        return url
+
+    fallback_urls = settings_url_map(settings)
+    var_map = {}
+    for var in template_vars:
+        var_name = var.get("var_name", "")
+        var_value = (var.get("var_value") or "").strip()
+        var_map[var_name] = var_value or fallback_urls.get(var_name, "")
+
+    def replace_var(match):
+        return var_map.get(match.group(1), match.group(0))
+
+    return re.sub(r"\{([^}]+)\}", replace_var, url)
 
 LEGACY_TEMPLATE = "## {title_date} 组内重点工作\n进度：[点击]({progress_doc_link})"
 SPARE_TEMPLATE = "备用模板内容"
@@ -220,12 +275,12 @@ def test_migrated_custom_notification_renders_identically_to_the_legacy_builder(
     }
 
     for title, legacy_task in legacy_tasks.items():
-        expected = build_custom_notification(legacy_task, template_vars, settings)
+        expected = legacy_build_custom_notification(legacy_task, template_vars, settings)
         actual = render_message_template(settings, by_name[title], template_vars, None)
         assert actual == expected, title
 
     # Sanity check: the doc-link variable really was substituted from the DB value.
-    assert "https://doc.example/db-progress" in build_custom_notification(
+    assert "https://doc.example/db-progress" in legacy_build_custom_notification(
         legacy_tasks["提醒更新进度"], template_vars, settings
     )
 
