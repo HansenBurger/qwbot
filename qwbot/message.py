@@ -1,11 +1,96 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from qwbot.config import Settings
 from qwbot.planner import batch_title
 from qwbot.sources import ReminderData
+
+SETTINGS_URL_VARS = (
+    ("progress_doc_link", "progress_doc_url"),
+    ("case_assignment_doc_link", "case_assignment_doc_url"),
+    ("batch_register_doc_link", "batch_register_doc_url"),
+    ("agenda_doc_link", "agenda_doc_url"),
+    ("frontend_link", "frontend_url"),
+)
+
+
+def settings_url_map(settings: Settings | None) -> dict[str, str]:
+    """`.env` fallback values for the well-known document link variables."""
+    if settings is None:
+        return {}
+    return {var_name: (getattr(settings, attr) or "") for var_name, attr in SETTINGS_URL_VARS}
+
+
+def build_template_variables(
+    settings: Settings,
+    next_batch: dict[str, str] | None,
+    template_vars: list[dict[str, str]] | None = None,
+) -> dict[str, str]:
+    """System variables merged with DB-managed document link variables."""
+    from qwbot.store import DEFAULT_TEMPLATE_VARS
+
+    now = datetime.now(ZoneInfo(settings.timezone))
+    variables = {
+        "title_date": now.strftime("%m月%d日"),
+        "current_trading_date": _batch_current_date(next_batch),
+        "next_trading_date": _batch_next_date(next_batch),
+    }
+    fallback_urls = settings_url_map(settings)
+    if template_vars:
+        for var in template_vars:
+            var_name = var.get("var_name", "")
+            if not var_name:
+                continue
+            var_value = (var.get("var_value") or "").strip()
+            variables[var_name] = var_value or fallback_urls.get(var_name, "")
+    else:
+        for var_name in DEFAULT_TEMPLATE_VARS:
+            variables[var_name] = fallback_urls.get(var_name, "")
+    return variables
+
+
+def render_message_template(
+    settings: Settings,
+    template: dict[str, object] | str | None,
+    template_vars: list[dict[str, str]] | None = None,
+    next_batch: dict[str, str] | None = None,
+) -> str:
+    """Render one webhook message template.
+
+    Accepts either a template dict from `message_templates` (with `content` and
+    `at_all`) or a raw template string. `{var_name}` placeholders are replaced with
+    system variables and DB-managed document links; `<@all>` is appended when the
+    template asks for it and the body does not already contain it.
+    """
+    from qwbot.store import DEFAULT_REMINDER_TEMPLATE
+
+    if isinstance(template, dict):
+        content = str(template.get("content") or "")
+        at_all = _is_truthy(template.get("at_all"))
+    else:
+        content = str(template or "")
+        at_all = False
+
+    if not content.strip():
+        content = DEFAULT_REMINDER_TEMPLATE
+
+    variables = build_template_variables(settings, next_batch, template_vars)
+    rendered = content
+    for key, value in variables.items():
+        rendered = rendered.replace("{" + key + "}", value)
+    if at_all and "<@all>" not in rendered:
+        rendered = f"{rendered}\n\n<@all>"
+    return rendered
+
+
+def _is_truthy(value: object) -> bool:
+    """Accept both the DB string flag ("true") and the decoded boolean."""
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"true", "1", "yes", "y", "on"}
 
 
 def build_scheduled_reminder(
@@ -14,43 +99,8 @@ def build_scheduled_reminder(
     template: str | None = None,
     template_vars: list[dict[str, str]] | None = None,
 ) -> str:
-    from qwbot.store import DEFAULT_REMINDER_TEMPLATE, DEFAULT_TEMPLATE_VARS
-    if template is None:
-        template = DEFAULT_REMINDER_TEMPLATE
-    now = datetime.now(ZoneInfo(settings.timezone))
-    title_date = now.strftime("%m月%d日")
-    # System variables (computed at runtime, not editable)
-    variables = {
-        "title_date": title_date,
-        "current_trading_date": _batch_current_date(next_batch),
-        "next_trading_date": _batch_next_date(next_batch),
-    }
-    # Merge custom template vars from DB; fall back to settings URLs when var_value is empty
-    settings_url_map = {
-        "progress_doc_link": settings.progress_doc_url,
-        "case_assignment_doc_link": settings.case_assignment_doc_url,
-        "batch_register_doc_link": settings.batch_register_doc_url,
-        "agenda_doc_link": settings.agenda_doc_url,
-        "frontend_link": settings.frontend_url,
-    }
-    if template_vars:
-        for var in template_vars:
-            var_name = var.get("var_name", "")
-            var_value = var.get("var_value", "").strip()
-            if not var_value:
-                # Fall back to settings URL for known default vars (raw URL)
-                fallback_url = settings_url_map.get(var_name)
-                var_value = fallback_url or ""
-            variables[var_name] = var_value
-    else:
-        # No template_vars provided: use legacy fallback to settings for default vars
-        for var_name, (var_label, _) in DEFAULT_TEMPLATE_VARS.items():
-            fallback_url = settings_url_map.get(var_name)
-            variables[var_name] = fallback_url or ""
-    result = template
-    for key, value in variables.items():
-        result = result.replace("{" + key + "}", value)
-    return result
+    """Compatibility entry point kept for the CLI and existing callers."""
+    return render_message_template(settings, template, template_vars, next_batch)
 
 
 def build_daily_reminder(settings: Settings, data: ReminderData) -> str:
@@ -135,29 +185,15 @@ def _resolve_doc_url(
     if not url or not url.startswith("{") or not template_vars:
         return url
 
-    # Build variable map
+    fallback_urls = settings_url_map(settings)
     var_map = {}
-    settings_url_map = {}
-    if settings:
-        settings_url_map = {
-            "progress_doc_link": settings.progress_doc_url,
-            "case_assignment_doc_link": settings.case_assignment_doc_url,
-            "batch_register_doc_link": settings.batch_register_doc_url,
-            "agenda_doc_link": settings.agenda_doc_url,
-            "frontend_link": settings.frontend_url,
-        }
-
     for var in template_vars:
         var_name = var.get("var_name", "")
-        var_value = var.get("var_value", "").strip()
+        var_value = (var.get("var_value") or "").strip()
         if not var_value:
-            # Fall back to settings URL for known default vars
-            fallback_url = settings_url_map.get(var_name)
-            var_value = fallback_url if fallback_url else ""
+            var_value = fallback_urls.get(var_name, "")
         var_map[var_name] = var_value
 
-    # Replace {var_name} references
-    import re
     def replace_var(match):
         var_name = match.group(1)
         return var_map.get(var_name, match.group(0))

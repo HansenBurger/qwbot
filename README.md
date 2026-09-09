@@ -5,20 +5,46 @@
 ## 功能
 
 - 支持企业微信群机器人 webhook 推送 markdown/text 消息。
-- 支持立即发送、预览消息、webhook 连通性测试和常驻定时发送。
+- **群机器人（webhook）在维护页面直接管理**，不再依赖环境变量：一个机器人下可配置多个消息模板，一个模板下可配置多个通知时间。
+- 支持立即发送、预览消息、按机器人测试连通性、按模板测试发送和常驻定时发送。
 - 支持本地维护页面登记跑批计划。
 - 支持从企业微信在线文档导出的 JSON/CSV 地址读取“跑批计划”和“执行进度”。
 - 未配置在线文档地址时，默认从 `data/sample_status.json` 首次迁移到 SQLite，并以 `data/qwbot.sqlite3` 作为运行态数据。
+
+## 通知模型（QWB-002）
+
+消息通知是三级结构，全部保存在 SQLite 中，维护页面 `/notifications` 可以直接增删改：
+
+```
+群机器人 webhook
+ └── 消息模板（可多个，各自独立启停、@所有人、发送范围）
+      └── 通知时间（可多个，各自独立启停，可单独覆盖发送范围）
+```
+
+- 换群、加群、改时间都在页面上完成，**不需要改 `.env`，也不需要重启容器**；调度器每 30 秒重新读取一次配置。
+- `.env` 里的 `WECOM_WEBHOOK_URL_PROD` / `WECOM_WEBHOOK_URL_TEST` 只用于两件事：数据库首次初始化时播种机器人（只播种一次），以及数据库里某个机器人地址留空时按 `prod`/`test` 标签兜底。页面上的“从 .env 导入”可以随时把环境变量里的地址补充进数据库（按地址去重）。
+- `WECOM_WEBHOOK_TARGET` 决定首次播种时哪个机器人是默认的，以及 CLI `--webhook prod|test` 的兜底目标；它不再是全局开关，不同机器人可以同时往不同群发消息。
+- 默认机器人用于跑批“开始/完成”等即时通知，可在页面上随时切换。
+- 单个机器人失效（被移出群、key 过期）只会记录日志，不影响其他机器人和其他时间点。
+- 升级到该版本时，原有的固定工作提醒时间、消息模板和自定义通知会自动迁移到新结构，旧表数据保留以便回滚。
 
 ## 快速开始
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install -e .
+pip install -e ".[dev]"
 ```
 
-项目已创建本地 `.env`，其中包含当前群机器人的 webhook。`.env` 已加入 `.gitignore`，不要提交到仓库。可分别配置生产群和自测群机器人，通过 `WECOM_WEBHOOK_TARGET` 或 CLI 的 `--webhook test|prod` 选择发送目标。
+Linux / macOS：
+
+```sh
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+```
+
+项目已创建本地 `.env`，其中包含当前群机器人的 webhook。`.env` 已加入 `.gitignore`，不要提交到仓库。首次启动会把 `.env` 里的地址播种成数据库中的机器人；之后请统一在 `/notifications` 页面维护。CLI 仍可用 `--webhook test|prod`（按标签选中数据库里的机器人）、`--webhook-id`、`--template` 精确指定发送目标。
 
 预览将要发送的消息：
 
@@ -26,25 +52,28 @@ pip install -e .
 python -m qwbot.cli preview
 ```
 
-测试 webhook：
+测试 webhook（默认机器人，可用 `--webhook` / `--webhook-id` 指定）：
 
 ```powershell
 python -m qwbot.cli test-webhook
+python -m qwbot.cli test-webhook --webhook prod
 ```
 
-立即发送日报提醒：
+立即发送消息模板（默认机器人下所有启用的模板，可用 `--template` 只发一个）：
 
 ```powershell
 python -m qwbot.cli send-now
+python -m qwbot.cli send-now --webhook-id 3 --template 7
 ```
 
 手动执行一次定时任务逻辑：
 
 ```powershell
 python -m qwbot.cli run-scheduled-once
+python -m qwbot.cli run-scheduled-once --at 09:00
 ```
 
-`run-scheduled-once` 和真正的 09:00、18:00 定时任务一致，会检查是否为工作日、是否为自然节假日；如果不满足发送条件会跳过。`send-now` 则用于强制发送测试，不做工作日判断。
+`run-scheduled-once` 和真正的定时任务一致，会遍历“启用的机器人 × 启用的模板 × 启用的通知时间”，并检查发送范围、工作日、自然节假日和日期覆盖；不满足条件会跳过。`--at HH:MM` 可以用指定时间代替当前时间，便于自测。`send-now` 用于强制发送测试，不做日期判断。
 
 启动定时任务：
 
@@ -60,7 +89,16 @@ python -m qwbot.cli web
 
 打开 `http://127.0.0.1:5000`，即可维护跑批计划。页面默认按自然日历、跑批前交易日期、跑批后交易日期升序展示未归档计划；新建和修改通过弹窗完成；只有“已完成”计划允许归档，“待执行”允许修改和删除，“进行中/有阻塞”只允许修改。状态改为“已完成”后当天仍保留在未归档列表，第二天打开页面时会自动归档。已归档记录为只读，支持分页、按自然日/交易日/节假日筛选和详情查看；进入已归档页时默认展示当天自然日的归档记录，如果当天无数据则展示最近一个有归档数据的自然日。状态为“有阻塞”时需要填写阻塞原因，并会自动展示在跑批计划下方的阻塞看板；每次阻塞会记录开始、关闭和持续时间，可在看板或归档详情中查看。未归档计划支持维护“计划执行时间”；点击“开始”会通知批量开始执行并 `@所有人`，点击“完成”会通知已完成批量和下一批量。运行态数据会写入 SQLite 数据库 `data/qwbot.sqlite3`，首次启动会从 `data/sample_status.json` 自动迁移；机器人预览、立即发送和定时发送都会读取未归档的跑批计划。
 
-打开 `http://127.0.0.1:5000/notifications`，即可维护消息通知。原有组内重点工作提醒内容由系统生成，默认提供 09:00 和 18:00 两个发送时间点，并支持新增、修改、删除多个发送时间点；页面会展示今天和后续自然日，工作日默认提醒，周末和节假日默认不提醒，每个自然日都可手动设为不提醒或恢复提醒。自定义通知支持新增、修改、删除，可填写消息内容、在线文档链接和是否 `@所有人`。
+打开 `http://127.0.0.1:5000/notifications`，即可维护群机器人和消息通知：
+
+- **群机器人**：新增、编辑、启用/停用、设为默认、测试连通性、删除。页面上 webhook 地址一律脱敏展示（`key=MOCK****0001`），编辑弹窗也不回填完整 key，留空表示保持不变，勾选“清空地址”才会退回 `.env` 兜底。
+- **消息模板**：每个机器人下可新增任意多个模板，支持模板名、消息内容、`@所有人`、发送范围（所有自然日 / 跳过周末和节假日 / 仅跳过节假日）、启用开关、复制和删除。模板编辑器保留变量标签点击插入、样式片段和企业微信气泡预览。
+- **通知时间**：每个模板下可配置多个时间点，逐个启用/停用、修改、删除，并可为单个时间点单独指定发送范围（例如工作日 09:00、周末 10:00）。
+- **日期覆盖**：模板级可对某个自然日单独“跳过”或“生效”，优先级高于全局提醒日期。
+- **全局提醒日期**：展示今天和后续自然日，工作日默认提醒，周末和节假日默认不提醒，可整体跳过或恢复。
+- **公共文档链接**：全局变量，所有机器人的模板都可以用 `{变量名}` 引用。
+
+删除机器人会级联删除其下所有模板和通知时间，最后一条机器人不允许删除。
 
 如果需要给同事访问，可指定监听地址：
 
@@ -68,9 +106,10 @@ python -m qwbot.cli web
 python -m qwbot.cli web --host 0.0.0.0 --port 5000
 ```
 
-定时任务默认每天 09:00 和 18:00 发送组内重点工作通知，可在维护页面维护多个发送时间点；周末、节假日和被设为不提醒的自然日会跳过固定工作提醒，手动恢复提醒的日期会照常发送。自定义消息通知按维护页面配置的时间发送。
+定时任务每 30 秒检查一次，把当前 `HH:MM` 与所有“启用的机器人 × 启用的模板 × 启用的通知时间”比对，命中即渲染并发送到对应机器人。默认迁移出 09:00 和 18:00 两个时间点；周末、节假日、被全局跳过的自然日以及被模板单独跳过的日期会按发送范围跳过，手动“生效”的日期照常发送。同一个进程内同一时间槽只会发送一次。
 
 ```dotenv
+# 仅在数据库首次初始化时播种机器人，以及机器人地址留空时兜底
 WECOM_WEBHOOK_URL_PROD=https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=your-prod-key
 WECOM_WEBHOOK_URL_TEST=https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=your-test-key
 WECOM_WEBHOOK_TARGET=test
@@ -135,6 +174,28 @@ BATCH_LONG_CYCLE_RANGE=A1:Z1000
 
 在这些信息补齐前，机器人会在首次启动时把 `data/sample_status.json` 迁移到 `data/qwbot.sqlite3`，保证推送流程可以先跑通。
 
+## 本地自测
+
+不依赖真实企业微信群的完整自测（单元测试 + 用 mock webhook 跑通页面和调度）：
+
+```sh
+sh scripts/selftest.sh          # pytest + 端到端
+sh scripts/selftest.sh --unit   # 只跑 pytest
+sh scripts/selftest.sh --live   # 只跑端到端
+```
+
+`scripts/selftest.sh` 会在 `tmp/selftest/` 下准备一次性 `.env` 和 SQLite 数据库，启动 `scripts/mock-webhook.py`（模拟企业微信机器人接口，`key` 以 `FAIL` 开头返回 `errcode 93000`，以 `HTTP500` 开头返回 500）和一个临时 web 服务，然后由 `scripts/selftest.py` 校验：环境变量播种、页面脱敏、机器人/模板/时间 CRUD、按机器人隔离投递、坏 webhook 不影响其他机器人、启停生效、调度命中、CLI `preview`/`send-now`/`test-webhook`、级联删除和“最后一个机器人不可删除”。
+
+单独启动 mock webhook：
+
+```sh
+python3 scripts/mock-webhook.py --host 127.0.0.1 --port 8089
+curl http://127.0.0.1:8089/__messages      # 查看收到的消息
+curl -X POST http://127.0.0.1:8089/__reset # 清空
+```
+
+真实自测群验证：把 `.env` 里的 `WECOM_WEBHOOK_URL_TEST` 换成测试群机器人的真实地址，启动后在页面上对该机器人点“测试连通性”，再对模板点“测试发送”。
+
 ## Linux Docker 部署
 
 服务器部署时不要把 `data/sample_status.json` 或 `data/qwbot.sqlite3` 打进镜像，也不要提交到 Git。旧 JSON 可由你手动上传到服务器项目目录的 `data/sample_status.json`，容器首次启动会迁移到同一 volume 下的 SQLite 数据库。
@@ -155,6 +216,8 @@ FRONTEND_URL=http://your-server-ip:5000
 QWBOT_PORT=5000
 QWBOT_DB_PATH=data/qwbot.sqlite3
 ```
+
+  首次启动后，机器人和通知配置都保存在 `data/qwbot.sqlite3` 里，之后在 `/notifications` 页面维护即可，改 `.env` 不会再生效（除非在页面上点“从 .env 导入”或把机器人地址清空）。
 
 1. 手动上传数据文件：
 
@@ -189,4 +252,4 @@ sh scripts/test-scheduled.sh
 sh scripts/stop.sh
 ```
 
-`docker-compose.yml` 中 Web 服务监听容器内 `0.0.0.0:5000`，服务器通过 `QWBOT_PORT` 暴露端口；`scheduler` 服务单独运行定时任务，和 Web 服务共享 `./data:/app/data`。
+`docker-compose.yml` 中 Web 服务监听容器内 `0.0.0.0:5000`，服务器通过 `QWBOT_PORT` 暴露端口；`scheduler` 服务单独运行定时任务，和 Web 服务共享 `./data:/app/data`。因为调度器每 30 秒重新读取数据库，页面上新增或修改机器人、模板、通知时间后 `scheduler` 容器**不需要重启**即可生效。

@@ -1,0 +1,93 @@
+<dialog class="modal" id="{{ modal_id }}">
+  <form class="modal-card" method="post" action="{{ form_action }}">
+    <div class="modal-header">
+      <h3>{{ modal_title }}</h3>
+      <button type="button" class="icon-button" data-close-modal="{{ modal_id }}" aria-label="关闭">×</button>
+    </div>
+
+    <div class="modal-grid">
+      <label>
+        <span>机器人名称</span>
+        <input
+          name="name"
+          value="{{ webhook.name if webhook else '' }}"
+          placeholder="如：贷款核算测试群"
+          required
+        >
+      </label>
+      <label>
+        <span>用途标签</span>
+        <select name="target">
+          {% for target in webhook_targets %}
+            <option
+              value="{{ target }}"
+              {% if webhook and webhook.target == target %}selected{% endif %}
+              {% if not webhook and target == 'custom' %}selected{% endif %}
+            >{{ webhook_target_labels[target] }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label class="wide">
+        <span>webhook 地址</span>
+        {% if webhook %}
+          <input
+            name="url"
+            type="url"
+            value=""
+            placeholder="留空表示保持不变，填写则覆盖"
+          >
+          <small class="field-hint">
+            当前地址：{{ webhook.masked_url }}（出于安全考虑页面不显示完整 key）
+          </small>
+          <label class="checkbox-label">
+            <input type="hidden" name="clear_url" value="">
+            <input type="checkbox" name="clear_url" value="true">
+            <span>清空地址，改用 .env 中「{{ webhook.target_label }}」的 webhook 兜底</span>
+          </label>
+        {% else %}
+          <input
+            name="url"
+            type="url"
+            value=""
+            placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=..."
+            required
+          >
+        {% endif %}
+      </label>
+      <label class="wide">
+        <span>备注</span>
+        <input
+          name="remark"
+          value="{{ webhook.remark if webhook else '' }}"
+          placeholder="选填，如：核算测试二群"
+        >
+      </label>
+      {% if not webhook %}
+        <label>
+          <span>首个通知时间</span>
+          <input type="time" name="send_time" value="{{ current_time }}">
+        </label>
+        <label class="checkbox-label">
+          <input type="hidden" name="is_default" value="">
+          <input type="checkbox" name="is_default" value="true">
+          <span>设为默认机器人</span>
+        </label>
+      {% endif %}
+      <label class="checkbox-label wide">
+        <input type="hidden" name="is_enabled" value="">
+        <input
+          type="checkbox"
+          name="is_enabled"
+          value="true"
+          {% if not webhook or webhook.is_enabled %}checked{% endif %}
+        >
+        <span>启用该机器人（停用后其下所有模板都不会发送）</span>
+      </label>
+    </div>
+
+    <div class="modal-actions">
+      <button type="button" class="secondary-button" data-close-modal="{{ modal_id }}">取消</button>
+      <button type="submit">保存</button>
+    </div>
+  </form>
+</dialog>

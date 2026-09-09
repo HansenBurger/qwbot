@@ -1,0 +1,246 @@
+<section class="board notification-board">
+  <div class="board-header">
+    <div>
+      <h2>群机器人与消息通知</h2>
+      <p>直接管理群机器人 webhook；每个机器人可配置多个消息模板，每个模板可配置多个通知时间。</p>
+    </div>
+    <div class="board-header-actions">
+      <form method="post" action="{{ url_for('import_webhooks_from_env') }}">
+        <button type="submit" class="ghost-button" title="把 .env 中的 webhook 补充到数据库，已存在的地址会跳过">从 .env 导入</button>
+      </form>
+      <button type="button" data-open-modal="create-webhook">+ 新增机器人</button>
+    </div>
+  </div>
+
+  <div class="webhook-list">
+    {% for webhook in webhook_tree %}
+      <article
+        class="webhook-card {% if not webhook.is_enabled %}is-disabled{% endif %}"
+        id="webhook-{{ webhook.id }}"
+      >
+        <header class="webhook-card-header">
+          <div class="webhook-card-heading">
+            <div class="webhook-title">
+              <strong>{{ webhook.name }}</strong>
+              <span class="pill target-pill target-{{ webhook.target }}">{{ webhook.target_label }}</span>
+              {% if webhook.is_default %}<span class="pill active-pill">默认</span>{% endif %}
+              {% if not webhook.is_enabled %}<span class="pill off-pill">已停用</span>{% endif %}
+              {% if not webhook.has_url %}<span class="pill warn-pill">未配置地址</span>{% endif %}
+            </div>
+            <p class="webhook-url" title="完整地址只在“编辑”弹窗中可见">{{ webhook.masked_url }}</p>
+            {% if webhook.remark %}<p class="webhook-remark">{{ webhook.remark }}</p>{% endif %}
+            <p class="webhook-meta">
+              <span>{{ webhook.template_count }} 个模板</span>
+              <span>{{ webhook.enabled_schedule_count }} 个启用时间</span>
+            </p>
+          </div>
+          <div class="webhook-actions">
+            <form method="post" action="{{ url_for('test_webhook', webhook_id=webhook.id) }}">
+              <button type="submit" class="link-button" data-confirm="确认向「{{ webhook.name }}」发送连通性测试消息？">测试连通性</button>
+            </form>
+            <form method="post" action="{{ url_for('toggle_webhook_state', webhook_id=webhook.id) }}">
+              <button type="submit" class="link-button">{{ "停用" if webhook.is_enabled else "启用" }}</button>
+            </form>
+            {% if not webhook.is_default %}
+              <form method="post" action="{{ url_for('mark_default_webhook', webhook_id=webhook.id) }}">
+                <button type="submit" class="link-button" title="跑批开始/完成等即时通知会发到默认机器人">设为默认</button>
+              </form>
+            {% endif %}
+            <button type="button" class="link-button" data-open-modal="edit-webhook-{{ webhook.id }}">编辑</button>
+            {% if webhook_count > 1 %}
+              <form method="post" action="{{ url_for('remove_webhook', webhook_id=webhook.id) }}">
+                <button
+                  type="submit"
+                  class="link-button danger-text"
+                  data-confirm="确认删除机器人「{{ webhook.name }}」？其下 {{ webhook.template_count }} 个消息模板和 {{ webhook.schedule_count }} 个通知时间会一起删除。"
+                >删除</button>
+              </form>
+            {% endif %}
+          </div>
+        </header>
+
+        <div class="template-stack">
+          {% for template in webhook.templates %}
+            <article
+              class="template-card {% if not template.is_enabled %}is-disabled{% endif %}"
+              id="template-{{ template.id }}"
+            >
+              <header class="template-card-header">
+                <div class="template-card-heading">
+                  <div class="template-title">
+                    <strong>{{ template.name }}</strong>
+                    {% if not template.is_enabled %}<span class="pill off-pill">已停用</span>{% endif %}
+                    {% if template.at_all %}<span class="pill">@所有人</span>{% endif %}
+                    <span class="pill rule-pill">{{ template.date_rule_label }}</span>
+                  </div>
+                  <p class="template-times">通知时间：{{ template.enabled_times }}</p>
+                </div>
+                <div class="template-card-actions">
+                  <button type="button" class="link-button" data-open-modal="edit-template-{{ template.id }}">编辑内容</button>
+                  <form method="post" action="{{ url_for('test_send_message_template', template_id=template.id) }}">
+                    <button type="submit" class="link-button" data-confirm="确认把模板「{{ template.name }}」发送到「{{ webhook.name }}」？">测试发送</button>
+                  </form>
+                  <form method="post" action="{{ url_for('toggle_message_template_state', template_id=template.id) }}">
+                    <button type="submit" class="link-button">{{ "停用" if template.is_enabled else "启用" }}</button>
+                  </form>
+                  <form method="post" action="{{ url_for('copy_message_template', template_id=template.id) }}">
+                    <button type="submit" class="link-button">复制</button>
+                  </form>
+                  <form method="post" action="{{ url_for('remove_message_template', template_id=template.id) }}">
+                    <button
+                      type="submit"
+                      class="link-button danger-text"
+                      data-confirm="确认删除模板「{{ template.name }}」？其 {{ template.schedules | length }} 个通知时间会一起删除。"
+                    >删除</button>
+                  </form>
+                </div>
+              </header>
+
+              <div class="schedule-strip">
+                <span class="strip-label">通知时间</span>
+                {% for schedule in template.schedules %}
+                  <span
+                    class="schedule-chip {% if not schedule.is_enabled %}is-off{% endif %}"
+                    id="schedule-{{ schedule.id }}"
+                  >
+                    <form method="post" action="{{ url_for('toggle_template_schedule_state', schedule_id=schedule.id) }}">
+                      <button
+                        type="submit"
+                        class="schedule-chip-time"
+                        title="点击{{ "停用" if schedule.is_enabled else "启用" }}该通知时间"
+                      >
+                        {{ schedule.send_time }}
+                        {% if schedule.date_rule %}<em>{{ date_rule_labels[schedule.date_rule] }}</em>{% endif %}
+                      </button>
+                    </form>
+                    <button
+                      type="button"
+                      class="schedule-chip-edit"
+                      data-open-modal="edit-schedule-{{ schedule.id }}"
+                      aria-label="修改通知时间 {{ schedule.send_time }}"
+                    >✎</button>
+                    <form method="post" action="{{ url_for('remove_template_schedule', schedule_id=schedule.id) }}">
+                      <button
+                        type="submit"
+                        class="schedule-chip-delete"
+                        data-confirm="确认删除通知时间 {{ schedule.send_time }}？"
+                        aria-label="删除通知时间 {{ schedule.send_time }}"
+                      >×</button>
+                    </form>
+                  </span>
+                {% endfor %}
+                <button
+                  type="button"
+                  class="schedule-chip schedule-chip-add"
+                  data-open-modal="create-schedule-{{ template.id }}"
+                >
+                  <span>+</span> 新增时间
+                </button>
+              </div>
+
+              <div class="template-date-strip">
+                <span class="strip-label">日期覆盖</span>
+                <form class="template-date-form" method="post" action="{{ url_for('skip_template_date', template_id=template.id) }}">
+                  <input type="date" name="target_date" required aria-label="选择日期">
+                  <button type="submit" class="mini-button">跳过</button>
+                  <button
+                    type="submit"
+                    class="mini-button secondary-mini"
+                    formaction="{{ url_for('force_template_date', template_id=template.id) }}"
+                  >生效</button>
+                </form>
+                {% for entry in template.override_dates %}
+                  <span class="override-chip {{ entry.mode }}">
+                    {{ entry.date }} · {{ "跳过" if entry.mode == "skip" else "生效" }}
+                    <form method="post" action="{{ url_for('remove_template_date_override', template_id=template.id) }}">
+                      <input type="hidden" name="target_date" value="{{ entry.date }}">
+                      <button type="submit" aria-label="删除日期覆盖 {{ entry.date }}">×</button>
+                    </form>
+                  </span>
+                {% else %}
+                  <span class="strip-hint">未设置，跟随全局提醒日期和发送范围。</span>
+                {% endfor %}
+              </div>
+            </article>
+          {% else %}
+            <p class="empty inline-empty">该机器人下暂无消息模板，请点击“新增模板”添加。</p>
+          {% endfor %}
+
+          <button type="button" class="template-add-row" data-open-modal="create-template-{{ webhook.id }}">
+            <span>+</span>
+            新增模板
+          </button>
+        </div>
+      </article>
+    {% else %}
+      <p class="empty inline-empty">暂无群机器人，请点击“新增机器人”添加。</p>
+    {% endfor %}
+  </div>
+</section>
+
+{# ── Webhook modals ── #}
+{% set webhook = none %}
+{% set modal_id = "create-webhook" %}
+{% set modal_title = "新增群机器人" %}
+{% set form_action = url_for('create_webhook') %}
+{% include "_webhook_modal.html" %}
+
+{% for webhook in webhook_tree %}
+  {% set modal_id = "edit-webhook-" ~ webhook.id %}
+  {% set modal_title = "编辑群机器人" %}
+  {% set form_action = url_for('edit_webhook', webhook_id=webhook.id) %}
+  {% include "_webhook_modal.html" %}
+{% endfor %}
+
+{# ── Template modals ── #}
+{% for webhook in webhook_tree %}
+  {% set template = none %}
+  {% set modal_id = "create-template-" ~ webhook.id %}
+  {% set modal_title = "新增消息模板" %}
+  {% set form_action = url_for('create_message_template', webhook_id=webhook.id) %}
+  {% set test_send_action = "" %}
+  {% include "_template_modal.html" %}
+
+  {% for template in webhook.templates %}
+    {% set modal_id = "edit-template-" ~ template.id %}
+    {% set modal_title = "编辑消息模板" %}
+    {% set form_action = url_for('edit_message_template', template_id=template.id) %}
+    {% set test_send_action = url_for('test_send_message_template', template_id=template.id) %}
+    {% include "_template_modal.html" %}
+  {% endfor %}
+{% endfor %}
+
+{# ── Schedule modals ── #}
+{% for webhook in webhook_tree %}
+  {% for template in webhook.templates %}
+    {% set schedule = none %}
+    {% set modal_id = "create-schedule-" ~ template.id %}
+    {% set modal_title = "新增通知时间" %}
+    {% set form_action = url_for('create_template_schedule', template_id=template.id) %}
+    {% include "_schedule_modal.html" %}
+
+    {% for schedule in template.schedules %}
+      {% set modal_id = "edit-schedule-" ~ schedule.id %}
+      {% set modal_title = "修改通知时间" %}
+      {% set form_action = url_for('edit_template_schedule', schedule_id=schedule.id) %}
+      {% include "_schedule_modal.html" %}
+    {% endfor %}
+  {% endfor %}
+{% endfor %}
+
+<dialog class="modal" id="template-preview-modal">
+  <div class="modal-card template-preview-card">
+    <div class="modal-header">
+      <h3>模板预览</h3>
+      <button type="button" class="icon-button" data-close-modal="template-preview-modal" aria-label="关闭">×</button>
+    </div>
+    <div class="template-preview-container">
+      <div class="wecom-chat-bubble">
+        <div class="wecom-message" id="template-preview-content"></div>
+      </div>
+    </div>
+    <div class="template-preview-hint">
+      <p>预览效果仅供参考，实际显示以企业微信客户端为准</p>
+    </div>
+  </div>
+</dialog>

@@ -1,0 +1,148 @@
+<dialog class="modal" id="{{ modal_id }}">
+  <form class="modal-card template-modal-card" method="post" action="{{ form_action }}" data-template-form>
+    <div class="modal-header">
+      <h3>{{ modal_title }}</h3>
+      <button type="button" class="icon-button" data-close-modal="{{ modal_id }}" aria-label="关闭">×</button>
+    </div>
+
+    <div class="modal-grid">
+      <label>
+        <span>模板名称</span>
+        <input
+          name="name"
+          value="{{ template.name if template else '' }}"
+          placeholder="如：组内重点工作提醒"
+          required
+        >
+      </label>
+      <label>
+        <span>发送范围</span>
+        <select name="date_rule">
+          {% for rule, label in date_rule_labels.items() %}
+            <option
+              value="{{ rule }}"
+              {% if template %}
+                {% if template.date_rule == rule %}selected{% endif %}
+              {% else %}
+                {% if rule == 'business_day' %}selected{% endif %}
+              {% endif %}
+            >{{ label }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      {% if not template %}
+        <label>
+          <span>通知时间</span>
+          <input type="time" name="send_time" value="{{ current_time }}">
+        </label>
+        <label class="checkbox-label">
+          <input type="hidden" name="at_all" value="">
+          <input type="checkbox" name="at_all" value="true">
+          <span>发送时 @所有人</span>
+        </label>
+      {% else %}
+        <label class="checkbox-label wide">
+          <input type="hidden" name="at_all" value="">
+          <input type="checkbox" name="at_all" value="true" {% if template.at_all %}checked{% endif %}>
+          <span>发送时 @所有人（自动在正文末尾追加 &lt;@all&gt;）</span>
+        </label>
+      {% endif %}
+      <label class="checkbox-label wide">
+        <input type="hidden" name="is_enabled" value="">
+        <input
+          type="checkbox"
+          name="is_enabled"
+          value="true"
+          {% if not template or template.is_enabled %}checked{% endif %}
+        >
+        <span>启用该模板（停用后不会按通知时间发送）</span>
+      </label>
+
+      <div class="wide template-editor">
+        <div class="template-editor-toolbar">
+          <span class="template-editor-label">消息内容</span>
+          <span class="template-editor-hint">支持企业微信 markdown 和 <code>{变量}</code> 占位符</span>
+        </div>
+        <textarea
+          name="content"
+          rows="10"
+          class="template-textarea"
+          placeholder="输入消息模板"
+          data-template-textarea
+        >{{ template.content if template else default_reminder_template }}</textarea>
+      </div>
+
+      <details class="template-vars-collapse wide">
+        <summary class="template-vars-summary">
+          <strong>系统变量</strong>
+          <span class="vars-count">{{ reminder_template_vars | length }} 个</span>
+        </summary>
+        <div class="template-vars-list">
+          {% for var_name, var_desc in reminder_template_vars %}
+            <button
+              type="button"
+              class="template-var-tag"
+              data-insert-var="{{ var_name }}"
+              title="点击插入变量"
+            >{ {{ var_name }} }<span>{{ var_desc }}</span></button>
+          {% endfor %}
+        </div>
+      </details>
+
+      <details class="template-vars-collapse wide">
+        <summary class="template-vars-summary">
+          <strong>文档链接变量</strong>
+          <span class="vars-count">{{ custom_template_vars | length }} 个</span>
+        </summary>
+        <div class="template-vars-list">
+          {% for var in custom_template_vars %}
+            <button
+              type="button"
+              class="template-var-tag"
+              data-insert-var="{{ var.var_name }}"
+              data-var-label="{{ var.var_label }}"
+              title="点击插入变量：{{ var.var_label }}"
+            >{ {{ var.var_name }} }<span>{{ var.var_label }}</span></button>
+          {% endfor %}
+          <button
+            type="button"
+            class="template-var-tag template-var-add"
+            data-open-modal="create-template-var"
+            title="新增文档链接变量"
+          >+<span>新增变量</span></button>
+        </div>
+      </details>
+
+      <details class="template-vars-collapse wide">
+        <summary class="template-vars-summary">
+          <strong>样式片段</strong>
+          <span class="vars-count">8 个</span>
+        </summary>
+        <div class="template-vars-list">
+          <button type="button" class="template-var-tag style-snippet" data-insert-snippet="## " title="插入标题">## <span>标题</span></button>
+          <button type="button" class="template-var-tag style-snippet snippet-green" data-insert-snippet="&lt;font color=&quot;info&quot;&gt;文字&lt;/font&gt;" title="绿色文字"><font color="info">Aa</font><span>绿色</span></button>
+          <button type="button" class="template-var-tag style-snippet snippet-orange" data-insert-snippet="&lt;font color=&quot;warning&quot;&gt;文字&lt;/font&gt;" title="橙色文字"><font color="warning">Aa</font><span>橙色</span></button>
+          <button type="button" class="template-var-tag style-snippet snippet-gray" data-insert-snippet="&lt;font color=&quot;comment&quot;&gt;文字&lt;/font&gt;" title="灰色文字"><font color="comment">Aa</font><span>灰色</span></button>
+          <button type="button" class="template-var-tag style-snippet" data-insert-snippet="[文字](链接)" title="插入链接">[]<span>链接</span></button>
+          <button type="button" class="template-var-tag style-snippet" data-insert-snippet="&lt;@all&gt;" title="@所有人">@<span>全体</span></button>
+          <button type="button" class="template-var-tag style-snippet" data-insert-snippet="- " title="列表项">-<span>列表</span></button>
+          <button type="button" class="template-var-tag style-snippet" data-insert-snippet="&gt; " title="引用">&gt;<span>引用</span></button>
+        </div>
+      </details>
+    </div>
+
+    <div class="modal-actions">
+      <button type="button" class="secondary-button" data-close-modal="{{ modal_id }}">取消</button>
+      <button type="button" class="secondary-button" data-preview-template>预览效果</button>
+      {% if test_send_action %}
+        <button
+          type="submit"
+          class="secondary-button"
+          formaction="{{ test_send_action }}"
+          data-confirm="确认把当前内容测试发送到该模板所属的群机器人？未保存的修改不会写入数据库。"
+        >测试发送</button>
+      {% endif %}
+      <button type="submit">保存</button>
+    </div>
+  </form>
+</dialog>

@@ -37,8 +37,58 @@ class Settings:
                 prod_url=self.webhook_url_prod,
                 test_url=self.webhook_url_test,
                 legacy_url=self.webhook_url,
+                required=False,
             ),
         )
+
+    def env_webhook_url(self, target: str) -> str:
+        """Resolve a webhook URL from environment variables only.
+
+        Used as the fallback when a database-managed webhook has an empty URL.
+        Only the `prod` and `test` targets exist in `.env`; anything else (notably
+        `custom`) has no environment counterpart and resolves to an empty string so
+        the caller skips sending instead of leaking into the wrong group.
+        """
+        wanted = (target or "").strip().lower()
+        if wanted not in {"prod", "test"}:
+            return ""
+        return _select_webhook_url(
+            target=wanted,
+            prod_url=self.webhook_url_prod,
+            test_url=self.webhook_url_test,
+            legacy_url=self.webhook_url_prod or self.webhook_url,
+            required=False,
+        )
+
+    def webhook_seeds(self) -> list[dict[str, str]]:
+        """Webhook records seeded into the database on first run.
+
+        Environment variables are only a bootstrap source: after the first seed the
+        database is authoritative and later `.env` edits are ignored.
+        """
+        seeds: list[dict[str, str]] = []
+        if self.webhook_url_prod:
+            seeds.append(
+                {
+                    "name": "生产群机器人",
+                    "url": self.webhook_url_prod,
+                    "target": "prod",
+                    "remark": "由 .env WECOM_WEBHOOK_URL_PROD 初始化",
+                }
+            )
+        if self.webhook_url_test:
+            seeds.append(
+                {
+                    "name": "自测群机器人",
+                    "url": self.webhook_url_test,
+                    "target": "test",
+                    "remark": "由 .env WECOM_WEBHOOK_URL_TEST 初始化",
+                }
+            )
+        return seeds
+
+    def default_seed_target(self) -> str:
+        return self.webhook_target if self.webhook_target in {"prod", "test"} else "prod"
 
 
 def load_settings(env_file: str | Path = ".env") -> Settings:
@@ -52,6 +102,7 @@ def load_settings(env_file: str | Path = ".env") -> Settings:
         prod_url=webhook_url_prod,
         test_url=webhook_url_test,
         legacy_url=webhook_url_prod,
+        required=False,
     )
     return Settings(
         webhook_url=webhook_url,
@@ -88,16 +139,22 @@ def _select_webhook_url(
     prod_url: str | None,
     test_url: str | None,
     legacy_url: str | None,
+    required: bool = True,
 ) -> str:
     target = target.strip().lower()
     if target not in {"prod", "test"}:
-        raise RuntimeError("Environment variable WECOM_WEBHOOK_TARGET must be prod or test")
+        if required:
+            raise RuntimeError("Environment variable WECOM_WEBHOOK_TARGET must be prod or test")
+        target = "prod"
 
     selected = test_url if target == "test" else prod_url
     if selected:
         return selected
     if legacy_url:
         return legacy_url
+    if not required:
+        # Webhooks are managed in the database now; an empty env value is not fatal.
+        return ""
     missing_name = "WECOM_WEBHOOK_URL_TEST" if target == "test" else "WECOM_WEBHOOK_URL_PROD"
     raise RuntimeError(f"Missing required environment variable: {missing_name}")
 

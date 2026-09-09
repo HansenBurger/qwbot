@@ -1,49 +1,73 @@
 from __future__ import annotations
 
-import json
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from flask import Flask, redirect, render_template, request, url_for
 
 from qwbot.config import Settings
-from qwbot.message import build_batch_complete_notice, build_batch_start_notice, build_custom_notification, build_scheduled_reminder
-from qwbot.planner import is_business_day, is_completed, next_batch_after, sort_key
+from qwbot.message import (
+    build_batch_complete_notice,
+    build_batch_start_notice,
+    render_message_template,
+)
+from qwbot.planner import (
+    active_batch_items,
+    is_business_day,
+    is_completed,
+    next_batch_after,
+    sort_key,
+)
 from qwbot.store import (
     DEFAULT_REMINDER_TEMPLATE,
     REMINDER_TEMPLATE_VARS,
+    WEBHOOK_TARGETS,
+    WEBHOOK_TARGET_LABELS,
     add_block_event,
     add_item,
+    add_message_template,
     add_scheduler_force_date,
     add_scheduler_skip_date,
-    add_scheduler_time,
+    add_template_schedule,
+    add_template_var,
+    add_webhook,
+    check_duplicate_var_value,
     close_open_block,
+    delete_item,
+    delete_message_template,
     delete_scheduler_force_date,
     delete_scheduler_skip_date,
-    delete_scheduler_time,
-    delete_item,
-    get_item,
-    add_template,
-    add_template_var,
-    check_duplicate_var_value,
-    delete_template,
+    delete_template_date_override,
+    delete_template_schedule,
     delete_template_var,
-    get_active_template,
-    get_reminder_template,
-    get_templates,
-    get_template_vars,
+    delete_webhook,
+    duplicate_message_template,
+    get_item,
+    get_message_template,
+    get_webhook,
     has_open_block,
+    import_env_webhooks,
     init_store,
+    list_template_schedules,
+    list_webhooks,
     load_status_file,
-    set_active_template,
-    set_notification_date_override,
-    set_reminder_template,
-    update_template,
-    update_template_var,
-    update_scheduler_time,
+    load_webhook_tree,
+    resolve_default_webhook_url,
+    resolve_webhook_url,
+    set_default_webhook,
+    set_template_date_override,
+    toggle_message_template,
+    toggle_template_schedule,
+    toggle_webhook,
     update_item,
+    update_message_template,
     update_open_block_reason,
+    update_template_schedule,
+    update_template_var,
+    update_webhook,
 )
 from qwbot.wecom import WeComWebhookClient
 
@@ -52,12 +76,19 @@ DATE_RULE_LABELS = {
     "business_day": "跳过周末和节假日",
     "holiday_only": "仅跳过节假日",
 }
+CONNECTIVITY_TEST_TEXT = "企业微信机器人连通性测试成功。"
+WEBHOOK_FORM_TARGETS = WEBHOOK_TARGETS
 
 
 def create_app(settings: Settings) -> Flask:
     app = Flask(__name__)
     status_file = settings.db_path
-    init_store(status_file, settings.local_status_file)
+    init_store(
+        status_file,
+        settings.local_status_file,
+        webhook_seeds=settings.webhook_seeds(),
+        default_target=settings.default_seed_target(),
+    )
 
     @app.get("/")
     def index():
@@ -104,21 +135,10 @@ def create_app(settings: Settings) -> Flask:
     @app.get("/notifications")
     def notification_page():
         payload = load_status_file(status_file)
-        notification_tasks = _notification_tasks_for_view(
-            payload["notification_tasks"],
-            payload["batch_plan"],
-            settings.timezone,
-        )
-        notification_pagination = _paginate_entries(
-            notification_tasks,
-            page=_int_arg("notification_page", 1),
-            per_page=5,
-        )
         return render_template(
             "notifications.html",
-            scheduler_times=payload["scheduler_times"],
-            notification_tasks=notification_pagination["items"],
-            notification_pagination=notification_pagination,
+            webhook_tree=_webhook_tree_for_view(status_file),
+            webhook_count=len(list_webhooks(status_file)),
             reminder_dates=_reminder_date_entries(
                 payload["batch_plan"],
                 payload["scheduler_skip_dates"],
@@ -127,12 +147,12 @@ def create_app(settings: Settings) -> Flask:
             ),
             current_hour=_current_hour(settings.timezone),
             current_time=_current_time(settings.timezone),
-            reminder_template=get_active_template(status_file),
             default_reminder_template=DEFAULT_REMINDER_TEMPLATE,
             reminder_template_vars=REMINDER_TEMPLATE_VARS,
             custom_template_vars=payload.get("template_vars", []),
-            reminder_templates=get_templates(status_file),
-            active_template_id=_active_template_id(get_templates(status_file)),
+            date_rule_labels=DATE_RULE_LABELS,
+            webhook_targets=WEBHOOK_FORM_TARGETS,
+            webhook_target_labels=WEBHOOK_TARGET_LABELS,
         )
 
     @app.post("/items/<collection>")
@@ -188,10 +208,7 @@ def create_app(settings: Settings) -> Flask:
         item["started_on"] = _today_iso(settings.timezone)
         item["started_at"] = _now_iso(settings.timezone)
         update_item(status_file, "batch_plan", index, item)
-        WeComWebhookClient(settings.webhook_url).send_text(
-            build_batch_start_notice(item),
-            mentioned_list=["@all"],
-        )
+        _send_batch_notice(settings, status_file, build_batch_start_notice(item), mention_all=True)
         return redirect(url_for("index"))
 
     @app.post("/items/batch_plan/<int:index>/complete")
@@ -209,7 +226,9 @@ def create_app(settings: Settings) -> Flask:
         item["execution_seconds"] = str(_duration_seconds(item.get("started_at"), item["completed_at"]))
         next_entry = next_batch_after(payload["batch_plan"], index)
         update_item(status_file, "batch_plan", index, item)
-        WeComWebhookClient(settings.webhook_url).send_text(
+        _send_batch_notice(
+            settings,
+            status_file,
             build_batch_complete_notice(item, next_entry[1] if next_entry else None),
         )
         return redirect(url_for("index"))
@@ -226,61 +245,343 @@ def create_app(settings: Settings) -> Flask:
         update_item(status_file, "batch_plan", index, item)
         return redirect(url_for("index"))
 
-    @app.post("/notifications")
-    def create_notification():
-        add_item(status_file, "notification_tasks", _notification_from_form())
-        return redirect(url_for("notification_page"))
+    # ------------------------------------------------------------------
+    # Webhooks (QWB-002): webhook -> message template -> notification time
+    # ------------------------------------------------------------------
 
-    @app.post("/notifications/<int:index>")
-    def edit_notification(index: int):
-        update_item(status_file, "notification_tasks", index, _notification_from_form())
-        return redirect(url_for("notification_page"))
+    @app.post("/webhooks")
+    def create_webhook():
+        name = request.form.get("name", "").strip()
+        url = request.form.get("url", "").strip()
+        if not name:
+            return _notification_redirect(error="请填写机器人名称")
+        if not url:
+            return _notification_redirect(error="请填写机器人 webhook 地址")
+        if not _is_valid_webhook_url(url):
+            return _notification_redirect(error="webhook 地址必须以 http:// 或 https:// 开头")
+        duplicate = _find_webhook_by_url(status_file, url)
+        if duplicate:
+            return _notification_redirect(error=f"该 webhook 地址已存在于「{duplicate['name']}」")
+        webhook_id = add_webhook(
+            status_file,
+            name,
+            url,
+            target=request.form.get("target", "custom"),
+            remark=request.form.get("remark", ""),
+            is_enabled=_flag("is_enabled", True),
+            is_default=_flag("is_default"),
+        )
+        send_time = _send_time_from_form()
+        if send_time:
+            template_id = add_message_template(
+                status_file,
+                webhook_id,
+                f"{name} 默认模板",
+                DEFAULT_REMINDER_TEMPLATE,
+                send_times=[send_time],
+            )
+            return _notification_redirect(
+                notice=f"已新增机器人「{name}」和默认模板", anchor=f"template-{template_id}"
+            )
+        return _notification_redirect(notice=f"已新增机器人「{name}」", anchor=f"webhook-{webhook_id}")
 
-    @app.post("/notifications/<int:index>/delete")
-    def remove_notification(index: int):
-        delete_item(status_file, "notification_tasks", index)
-        return redirect(url_for("notification_page"))
+    @app.post("/webhooks/import-env")
+    def import_webhooks_from_env():
+        added = import_env_webhooks(
+            status_file,
+            settings.webhook_seeds(),
+            settings.default_seed_target(),
+        )
+        if added:
+            return _notification_redirect(notice=f"已从 .env 导入 {added} 个机器人")
+        return _notification_redirect(notice=".env 中没有新的 webhook 需要导入")
 
-    @app.post("/notifications/<int:index>/date-rule")
-    def edit_notification_date_rule(index: int):
-        task = get_item(status_file, "notification_tasks", index)
-        task["date_rule"] = _date_rule_from_form()
-        update_item(status_file, "notification_tasks", index, task)
-        return redirect(url_for("notification_page"))
+    @app.post("/webhooks/<int:webhook_id>")
+    def edit_webhook(webhook_id: int):
+        webhook = get_webhook(status_file, webhook_id)
+        if webhook is None:
+            return _notification_redirect(error="机器人不存在")
+        name = request.form.get("name", "").strip()
+        submitted_url = request.form.get("url", "").strip()
+        if not name:
+            return _notification_redirect(error="请填写机器人名称")
+        if submitted_url and not _is_valid_webhook_url(submitted_url):
+            return _notification_redirect(error="webhook 地址必须以 http:// 或 https:// 开头")
+        # The edit form never renders the stored key, so an empty field means
+        # "keep the current URL" unless the operator explicitly asks to clear it.
+        if submitted_url:
+            url = submitted_url
+        elif _flag("clear_url"):
+            url = ""
+        else:
+            url = webhook["url"]
+        duplicate = _find_webhook_by_url(status_file, url, exclude_id=webhook_id)
+        if duplicate:
+            return _notification_redirect(error=f"该 webhook 地址已存在于「{duplicate['name']}」")
+        update_webhook(
+            status_file,
+            webhook_id,
+            name,
+            url,
+            target=request.form.get("target", webhook["target"]),
+            remark=request.form.get("remark", ""),
+            is_enabled=_flag("is_enabled"),
+        )
+        return _notification_redirect(notice=f"已保存机器人「{name}」", anchor=f"webhook-{webhook_id}")
 
-    @app.post("/notifications/<int:index>/send-now")
-    def send_notification_now(index: int):
-        task = get_item(status_file, "notification_tasks", index)
+    @app.post("/webhooks/<int:webhook_id>/delete")
+    def remove_webhook(webhook_id: int):
+        webhook = get_webhook(status_file, webhook_id)
+        if webhook is None:
+            return _notification_redirect(error="机器人不存在")
+        try:
+            delete_webhook(status_file, webhook_id)
+        except ValueError as exc:
+            return _notification_redirect(error=str(exc))
+        return _notification_redirect(notice=f"已删除机器人「{webhook['name']}」及其模板和时间")
+
+    @app.post("/webhooks/<int:webhook_id>/toggle")
+    def toggle_webhook_state(webhook_id: int):
+        if get_webhook(status_file, webhook_id) is None:
+            return _notification_redirect(error="机器人不存在")
+        enabled = toggle_webhook(status_file, webhook_id)
+        return _notification_redirect(
+            notice="已启用机器人" if enabled else "已停用机器人",
+            anchor=f"webhook-{webhook_id}",
+        )
+
+    @app.post("/webhooks/<int:webhook_id>/set-default")
+    def mark_default_webhook(webhook_id: int):
+        webhook = get_webhook(status_file, webhook_id)
+        if webhook is None:
+            return _notification_redirect(error="机器人不存在")
+        set_default_webhook(status_file, webhook_id)
+        return _notification_redirect(
+            notice=f"已将「{webhook['name']}」设为默认机器人", anchor=f"webhook-{webhook_id}"
+        )
+
+    @app.post("/webhooks/<int:webhook_id>/test")
+    def test_webhook(webhook_id: int):
+        webhook = get_webhook(status_file, webhook_id)
+        if webhook is None:
+            return _notification_redirect(error="机器人不存在")
+        url = resolve_webhook_url(webhook, settings)
+        if not url:
+            return _notification_redirect(
+                error=f"机器人「{webhook['name']}」没有可用的 webhook 地址",
+                anchor=f"webhook-{webhook_id}",
+            )
+        try:
+            WeComWebhookClient(url).send_text(CONNECTIVITY_TEST_TEXT)
+        except Exception as exc:  # noqa: BLE001 - surfaced to the operator in the UI
+            return _notification_redirect(
+                error=f"机器人「{webhook['name']}」连通性测试失败：{exc}",
+                anchor=f"webhook-{webhook_id}",
+            )
+        return _notification_redirect(
+            notice=f"机器人「{webhook['name']}」连通性测试成功",
+            anchor=f"webhook-{webhook_id}",
+        )
+
+    @app.post("/webhooks/<int:webhook_id>/templates")
+    def create_message_template(webhook_id: int):
+        webhook = get_webhook(status_file, webhook_id)
+        if webhook is None:
+            return _notification_redirect(error="机器人不存在")
+        name = request.form.get("name", "").strip()
+        content = request.form.get("content", "")
+        if not name:
+            return _notification_redirect(error="请填写模板名称", anchor=f"webhook-{webhook_id}")
+        send_times = _send_times_from_form()
+        template_id = add_message_template(
+            status_file,
+            webhook_id,
+            name,
+            content or DEFAULT_REMINDER_TEMPLATE,
+            at_all=_flag("at_all"),
+            date_rule=_date_rule_from_form(),
+            is_enabled=_flag("is_enabled", True),
+            send_times=send_times,
+        )
+        return _notification_redirect(
+            notice=f"已新增模板「{name}」", anchor=f"template-{template_id}"
+        )
+
+    @app.post("/templates/<int:template_id>")
+    def edit_message_template(template_id: int):
+        template = get_message_template(status_file, template_id)
+        if template is None:
+            return _notification_redirect(error="消息模板不存在")
+        name = request.form.get("name", "").strip()
+        if not name:
+            return _notification_redirect(error="请填写模板名称", anchor=f"template-{template_id}")
+        update_message_template(
+            status_file,
+            template_id,
+            name,
+            request.form.get("content", ""),
+            at_all=_flag("at_all"),
+            date_rule=_date_rule_from_form(),
+            is_enabled=_flag("is_enabled"),
+        )
+        return _notification_redirect(notice=f"已保存模板「{name}」", anchor=f"template-{template_id}")
+
+    @app.post("/templates/<int:template_id>/delete")
+    def remove_message_template(template_id: int):
+        template = get_message_template(status_file, template_id)
+        if template is None:
+            return _notification_redirect(error="消息模板不存在")
+        delete_message_template(status_file, template_id)
+        return _notification_redirect(
+            notice=f"已删除模板「{template['name']}」及其通知时间",
+            anchor=f"webhook-{template['webhook_id']}",
+        )
+
+    @app.post("/templates/<int:template_id>/toggle")
+    def toggle_message_template_state(template_id: int):
+        template = get_message_template(status_file, template_id)
+        if template is None:
+            return _notification_redirect(error="消息模板不存在")
+        enabled = toggle_message_template(status_file, template_id)
+        return _notification_redirect(
+            notice=f"模板「{template['name']}」已启用" if enabled else f"模板「{template['name']}」已停用",
+            anchor=f"template-{template_id}",
+        )
+
+    @app.post("/templates/<int:template_id>/duplicate")
+    def copy_message_template(template_id: int):
+        template = get_message_template(status_file, template_id)
+        if template is None:
+            return _notification_redirect(error="消息模板不存在")
+        new_id = duplicate_message_template(status_file, template_id)
+        return _notification_redirect(
+            notice=f"已复制模板「{template['name']}」（副本默认停用）", anchor=f"template-{new_id}"
+        )
+
+    @app.post("/templates/<int:template_id>/test-send")
+    def test_send_message_template(template_id: int):
+        template = get_message_template(status_file, template_id)
+        if template is None:
+            return _notification_redirect(error="消息模板不存在")
+        webhook = get_webhook(status_file, int(template["webhook_id"]))
+        url = resolve_webhook_url(webhook, settings)
+        if not url:
+            return _notification_redirect(
+                error=f"机器人「{webhook['name'] if webhook else ''}」没有可用的 webhook 地址",
+                anchor=f"template-{template_id}",
+            )
         payload = load_status_file(status_file)
-        template_vars = payload.get("template_vars", [])
-        message = build_custom_notification(task, template_vars, settings)
-        WeComWebhookClient(settings.webhook_url).send_markdown(message)
-        return redirect(url_for("notification_page"))
+        preview = dict(template)
+        # Allow testing unsaved edits straight from the editor modal.
+        form_content = request.form.get("content", "")
+        if form_content.strip():
+            preview["content"] = form_content
+        if "at_all" in request.form:
+            preview["at_all"] = _flag("at_all")
+        message = render_message_template(
+            settings, preview, payload.get("template_vars", []), _next_active_batch(payload)
+        )
+        try:
+            WeComWebhookClient(url).send_markdown(message)
+        except Exception as exc:  # noqa: BLE001 - surfaced to the operator in the UI
+            return _notification_redirect(
+                error=f"测试发送失败：{exc}", anchor=f"template-{template_id}"
+            )
+        return _notification_redirect(
+            notice=f"已测试发送到「{webhook['name'] if webhook else '机器人'}」",
+            anchor=f"template-{template_id}",
+        )
 
-    @app.post("/notifications/<int:index>/skip-date")
-    def skip_notification_date(index: int):
-        set_notification_date_override(status_file, index, request.form.get("target_date", ""), "skip")
-        return redirect(url_for("notification_page"))
+    @app.post("/templates/<int:template_id>/schedules")
+    def create_template_schedule(template_id: int):
+        template = get_message_template(status_file, template_id)
+        if template is None:
+            return _notification_redirect(error="消息模板不存在")
+        send_time = _send_time_from_form()
+        if not send_time:
+            return _notification_redirect(error="请选择有效的通知时间", anchor=f"template-{template_id}")
+        try:
+            schedule_id = add_template_schedule(
+                status_file,
+                template_id,
+                send_time,
+                date_rule=request.form.get("date_rule", ""),
+                is_enabled=_flag("is_enabled", True),
+            )
+        except ValueError as exc:
+            return _notification_redirect(error=str(exc), anchor=f"template-{template_id}")
+        return _notification_redirect(
+            notice=f"已新增通知时间 {send_time}", anchor=f"schedule-{schedule_id}"
+        )
 
-    @app.post("/notifications/<int:index>/force-date")
-    def force_notification_date(index: int):
-        set_notification_date_override(status_file, index, request.form.get("target_date", ""), "force")
-        return redirect(url_for("notification_page"))
+    @app.post("/schedules/<int:schedule_id>")
+    def edit_template_schedule(schedule_id: int):
+        schedule = _find_schedule(status_file, schedule_id)
+        if schedule is None:
+            return _notification_redirect(error="通知时间不存在")
+        send_time = _send_time_from_form()
+        if not send_time:
+            return _notification_redirect(
+                error="请选择有效的通知时间", anchor=f"template-{schedule['template_id']}"
+            )
+        try:
+            update_template_schedule(
+                status_file,
+                schedule_id,
+                send_time,
+                date_rule=(
+                    request.form["date_rule"]
+                    if "date_rule" in request.form
+                    else schedule["date_rule"]
+                ),
+            )
+        except ValueError as exc:
+            return _notification_redirect(error=str(exc), anchor=f"template-{schedule['template_id']}")
+        return _notification_redirect(
+            notice=f"通知时间已更新为 {send_time}", anchor=f"template-{schedule['template_id']}"
+        )
 
-    @app.post("/scheduler-times/<reminder_id>")
-    def edit_scheduler_time(reminder_id: str):
-        update_scheduler_time(status_file, reminder_id, _send_time_from_form())
-        return redirect(url_for("notification_page"))
+    @app.post("/schedules/<int:schedule_id>/delete")
+    def remove_template_schedule(schedule_id: int):
+        schedule = _find_schedule(status_file, schedule_id)
+        if schedule is None:
+            return _notification_redirect(error="通知时间不存在")
+        delete_template_schedule(status_file, schedule_id)
+        return _notification_redirect(
+            notice="已删除通知时间", anchor=f"template-{schedule['template_id']}"
+        )
 
-    @app.post("/scheduler-times")
-    def create_scheduler_time():
-        add_scheduler_time(status_file, _send_time_from_form())
-        return redirect(url_for("notification_page"))
+    @app.post("/schedules/<int:schedule_id>/toggle")
+    def toggle_template_schedule_state(schedule_id: int):
+        schedule = _find_schedule(status_file, schedule_id)
+        if schedule is None:
+            return _notification_redirect(error="通知时间不存在")
+        enabled = toggle_template_schedule(status_file, schedule_id)
+        return _notification_redirect(
+            notice="通知时间已启用" if enabled else "通知时间已停用",
+            anchor=f"template-{schedule['template_id']}",
+        )
 
-    @app.post("/scheduler-times/<reminder_id>/delete")
-    def remove_scheduler_time(reminder_id: str):
-        delete_scheduler_time(status_file, reminder_id)
-        return redirect(url_for("notification_page"))
+    @app.post("/templates/<int:template_id>/skip-date")
+    def skip_template_date(template_id: int):
+        set_template_date_override(
+            status_file, template_id, request.form.get("target_date", ""), "skip"
+        )
+        return _notification_redirect(anchor=f"template-{template_id}")
+
+    @app.post("/templates/<int:template_id>/force-date")
+    def force_template_date(template_id: int):
+        set_template_date_override(
+            status_file, template_id, request.form.get("target_date", ""), "force"
+        )
+        return _notification_redirect(anchor=f"template-{template_id}")
+
+    @app.post("/templates/<int:template_id>/date-overrides/delete")
+    def remove_template_date_override(template_id: int):
+        delete_template_date_override(
+            status_file, template_id, request.form.get("target_date", "")
+        )
+        return _notification_redirect(anchor=f"template-{template_id}")
 
     @app.post("/scheduler-skip-dates")
     def create_scheduler_skip_date():
@@ -302,56 +603,6 @@ def create_app(settings: Settings) -> Flask:
         delete_scheduler_force_date(status_file, request.form.get("force_date", ""))
         return redirect(url_for("notification_page"))
 
-    @app.post("/reminder-template")
-    def save_reminder_template():
-        template = request.form.get("template", "").strip()
-        template_id = request.form.get("template_id", "").strip()
-        if template:
-            if template_id:
-                update_template(status_file, int(template_id), request.form.get("template_name", "默认模板"), template)
-            else:
-                set_reminder_template(status_file, template)
-        return redirect(url_for("notification_page"))
-
-    @app.post("/reminder-templates")
-    def create_reminder_template():
-        name = request.form.get("name", "").strip()
-        template_content = request.form.get("template_content", "").strip()
-        if name:
-            add_template(status_file, name, template_content or DEFAULT_REMINDER_TEMPLATE)
-        return redirect(url_for("notification_page"))
-
-    @app.post("/reminder-templates/<int:template_id>/delete")
-    def remove_reminder_template(template_id: int):
-        templates = get_templates(status_file)
-        if len(templates) <= 1:
-            # Prevent deleting the last template
-            return redirect(url_for("notification_page"))
-        delete_template(status_file, template_id)
-        return redirect(url_for("notification_page"))
-
-    @app.post("/reminder-templates/<int:template_id>/activate")
-    def activate_reminder_template(template_id: int):
-        set_active_template(status_file, template_id)
-        return redirect(url_for("notification_page"))
-
-    @app.post("/reminder-template/test-send")
-    def test_send_reminder_template():
-        payload = load_status_file(status_file)
-        from qwbot.planner import active_batch_items, is_completed
-        next_batch = next(
-            (item for _, item in active_batch_items(payload["batch_plan"]) if not is_completed(item)),
-            None,
-        )
-        # Use template from form if provided, otherwise fall back to active template
-        template = request.form.get("template", "").strip() or get_active_template(status_file)
-        message = build_scheduled_reminder(
-            settings, next_batch, template, payload.get("template_vars")
-        )
-        test_settings = settings.with_webhook_target("test")
-        WeComWebhookClient(test_settings.webhook_url).send_markdown(message)
-        return redirect(url_for("notification_page"))
-
     @app.post("/template-vars")
     def create_template_var():
         var_name = request.form.get("var_name", "").strip()
@@ -361,7 +612,7 @@ def create_app(settings: Settings) -> Flask:
             if var_value:
                 duplicate = check_duplicate_var_value(status_file, var_value)
                 if duplicate:
-                    return redirect(url_for("notification_page", error=f"链接已存在于变量 {duplicate}"))
+                    return _notification_redirect(error=f"链接已存在于变量 {duplicate}")
             add_template_var(status_file, var_name, var_label, var_value)
         return redirect(url_for("notification_page"))
 
@@ -374,7 +625,7 @@ def create_app(settings: Settings) -> Flask:
             if var_value:
                 duplicate = check_duplicate_var_value(status_file, var_value, exclude_id=var_id)
                 if duplicate:
-                    return redirect(url_for("notification_page", error=f"链接已存在于变量 {duplicate}"))
+                    return _notification_redirect(error=f"链接已存在于变量 {duplicate}")
             update_template_var(status_file, var_id, var_name, var_label, var_value)
         return redirect(url_for("notification_page"))
 
@@ -384,6 +635,105 @@ def create_app(settings: Settings) -> Flask:
         return redirect(url_for("notification_page"))
 
     return app
+
+
+def _notification_redirect(
+    error: str | None = None,
+    notice: str | None = None,
+    anchor: str | None = None,
+):
+    args: dict[str, str] = {}
+    if error:
+        args["error"] = error
+    if notice:
+        args["notice"] = notice
+    response = redirect(url_for("notification_page", **args))
+    if anchor:
+        response.headers["Location"] = f"{response.headers['Location']}#{anchor}"
+    return response
+
+
+def _send_batch_notice(
+    settings: Settings,
+    status_file: Path,
+    message: str,
+    mention_all: bool = False,
+) -> None:
+    """Batch start/complete notices always go to the default webhook."""
+    url = resolve_default_webhook_url(status_file, settings)
+    if not url:
+        return
+    client = WeComWebhookClient(url)
+    if mention_all:
+        client.send_text(message, mentioned_list=["@all"])
+    else:
+        client.send_text(message)
+
+
+def _next_active_batch(payload: dict[str, Any]) -> dict[str, str] | None:
+    return next(
+        (item for _, item in active_batch_items(payload["batch_plan"]) if not is_completed(item)),
+        None,
+    )
+
+
+def mask_webhook_url(url: str) -> str:
+    """Hide the middle of the webhook key so it is safe to show on screen."""
+    value = (url or "").strip()
+    if not value:
+        return "未配置"
+    match = re.search(r"([?&]key=)([^&#]+)", value)
+    if match:
+        key = match.group(2)
+        masked = "****" if len(key) <= 8 else f"{key[:4]}****{key[-4:]}"
+        return f"{value[: match.start(2)]}{masked}{value[match.end(2):]}"
+    if len(value) <= 24:
+        return value
+    return f"{value[:16]}****{value[-6:]}"
+
+
+def _is_valid_webhook_url(url: str) -> bool:
+    return url.startswith("http://") or url.startswith("https://")
+
+
+def _find_webhook_by_url(
+    path: Path,
+    url: str,
+    exclude_id: int | None = None,
+) -> dict[str, Any] | None:
+    if not url:
+        return None
+    for webhook in list_webhooks(path):
+        if exclude_id is not None and int(webhook["id"]) == exclude_id:
+            continue
+        if webhook["url"] == url:
+            return webhook
+    return None
+
+
+def _find_schedule(path: Path, schedule_id: int) -> dict[str, Any] | None:
+    for schedule in list_template_schedules(path):
+        if int(schedule["id"]) == schedule_id:
+            return schedule
+    return None
+
+
+def _webhook_tree_for_view(path: Path) -> list[dict[str, Any]]:
+    tree = load_webhook_tree(path)
+    for webhook in tree:
+        webhook["masked_url"] = mask_webhook_url(webhook["url"])
+        webhook["has_url"] = bool(webhook["url"])
+        for template in webhook["templates"]:
+            template["date_rule_label"] = DATE_RULE_LABELS.get(template["date_rule"], "")
+            template["enabled_times"] = ", ".join(
+                schedule["send_time"]
+                for schedule in template["schedules"]
+                if schedule["is_enabled"]
+            ) or "未配置"
+            template["override_dates"] = [
+                {"date": value, "mode": "skip"} for value in template["skip_dates"]
+            ] + [{"date": value, "mode": "force"} for value in template["force_dates"]]
+    return tree
 
 
 def _item_from_form() -> dict[str, str]:
@@ -444,35 +794,42 @@ def _default_archive_filters(
     return {"natural_date": natural_date, "accounting_date": "", "holiday_flag": ""}
 
 
-def _notification_from_form() -> dict[str, str]:
-    return {
-        "title": request.form.get("title", ""),
-        "content": request.form.get("content", ""),
-        "doc_links": _doc_links_from_form(),
-        "send_time": _send_time_from_form(),
-        "at_all": "true" if request.form.get("at_all") == "true" else "",
-        "date_rule": _date_rule_from_form(),
-    }
+def _flag(name: str, default: bool = False) -> bool:
+    """Checkbox state that tells "not submitted" apart from "submitted unchecked".
 
-
-def _doc_links_from_form() -> list[dict[str, str]]:
-    labels = request.form.getlist("doc_label")
-    urls = request.form.getlist("doc_url")
-    return [
-        {"label": label.strip(), "url": url.strip()}
-        for label, url in zip(labels, urls)
-        if url.strip()
-    ]
+    Every checkbox in the maintenance forms is paired with a hidden input carrying
+    an empty value, so an unchecked box arrives as `[""]` while a missing field
+    arrives as `[]`. Programmatic posts that omit the field therefore keep the
+    `default` instead of silently disabling the row.
+    """
+    values = request.form.getlist(name)
+    if not values:
+        return default
+    return any(value == "true" for value in values)
 
 
 def _send_time_from_form() -> str:
-    send_time = request.form.get("send_time", "").strip()
-    parts = send_time.split(":")
+    """Normalize the `send_time` form field to HH:MM, empty string when invalid."""
+    return _normalize_send_time(request.form.get("send_time", ""))
+
+
+def _send_times_from_form() -> list[str]:
+    """Normalize every `send_time` value submitted (a template may have several)."""
+    times: list[str] = []
+    for raw in request.form.getlist("send_time"):
+        value = _normalize_send_time(raw)
+        if value and value not in times:
+            times.append(value)
+    return times
+
+
+def _normalize_send_time(value: object) -> str:
+    parts = str(value or "").strip().split(":")
     if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
         hour = max(0, min(23, int(parts[0])))
         minute = max(0, min(59, int(parts[1])))
         return f"{hour:02d}:{minute:02d}"
-    return "00:00"
+    return ""
 
 
 def _current_hour(timezone: str) -> str:
@@ -481,32 +838,6 @@ def _current_hour(timezone: str) -> str:
 
 def _current_time(timezone: str) -> str:
     return datetime.now(ZoneInfo(timezone)).strftime("%H:%M")
-
-
-def _doc_links_json(doc_links: object) -> str:
-    if not isinstance(doc_links, list):
-        return "[]"
-    return json.dumps(doc_links, ensure_ascii=False)
-
-
-def _notification_tasks_for_view(
-    tasks: list[dict[str, object]],
-    batch_plan: list[dict[str, str]] | None = None,
-    timezone: str | None = None,
-) -> list[dict[str, object]]:
-    for task in tasks:
-        date_rule = _normalize_date_rule(str(task.get("date_rule") or ""))
-        task["date_rule"] = date_rule
-        task["date_rule_label"] = DATE_RULE_LABELS[date_rule]
-    return sorted(tasks, key=_notification_sort_key)
-
-
-def _notification_sort_key(task: dict[str, object]) -> tuple[str, int]:
-    try:
-        task_id = int(task.get("id") or 0)
-    except (TypeError, ValueError):
-        task_id = 0
-    return (str(task.get("send_time") or "99:99"), task_id)
 
 
 def _reminder_date_entries(
@@ -619,14 +950,6 @@ def _paginate_entries(
         "next_page": page + 1,
         "start_index": start,
     }
-
-
-
-def _active_template_id(templates: list[dict]) -> str:
-    for tpl in templates:
-        if tpl.get("is_active"):
-            return tpl["id"]
-    return ""
 
 
 def _is_archived(item: dict[str, object]) -> bool:

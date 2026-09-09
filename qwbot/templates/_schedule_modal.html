@@ -1,0 +1,47 @@
+<dialog class="modal" id="{{ modal_id }}">
+  <form class="modal-card" method="post" action="{{ form_action }}">
+    <div class="modal-header">
+      <h3>{{ modal_title }}</h3>
+      <button type="button" class="icon-button" data-close-modal="{{ modal_id }}" aria-label="关闭">×</button>
+    </div>
+
+    <div class="modal-grid">
+      <label>
+        <span>发送时间</span>
+        <input
+          type="time"
+          name="send_time"
+          value="{{ schedule.send_time if schedule else current_time }}"
+          required
+        >
+      </label>
+      <label>
+        <span>发送范围</span>
+        <select name="date_rule">
+          <option value="" {% if not schedule or not schedule.date_rule %}selected{% endif %}>跟随模板设置</option>
+          {% for rule, label in date_rule_labels.items() %}
+            <option
+              value="{{ rule }}"
+              {% if schedule and schedule.date_rule == rule %}selected{% endif %}
+            >{{ label }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      {% if not schedule %}
+        <label class="checkbox-label wide">
+          <input type="hidden" name="is_enabled" value="">
+          <input type="checkbox" name="is_enabled" value="true" checked>
+          <span>启用该通知时间</span>
+        </label>
+      {% endif %}
+      <p class="field-hint wide">
+        同一个模板可以配置多个通知时间；调度器每分钟检查一次，到点即发送。
+      </p>
+    </div>
+
+    <div class="modal-actions">
+      <button type="button" class="secondary-button" data-close-modal="{{ modal_id }}">取消</button>
+      <button type="submit">保存</button>
+    </div>
+  </form>
+</dialog>

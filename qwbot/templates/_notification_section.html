@@ -1,210 +1,59 @@
-<section class="board notification-board">
+<section class="board reminder-date-board">
   <div class="board-header">
     <div>
-      <h2>消息通知</h2>
-      <p>维护需要定时发送到群里的自定义通知；原有组内重点工作提醒仅允许修改发送时间。</p>
+      <h2>全局提醒日期</h2>
+      <p>工作日默认提醒，周末和节假日默认不提醒；这里的设置对发送范围不是“所有自然日”的模板统一生效。</p>
     </div>
   </div>
 
-  <div class="scheduler-panel">
-    <div class="scheduler-heading">
+  <div class="reminder-date-panel">
+    <div class="reminder-date-toolbar">
       <div>
-        <h3>固定工作提醒</h3>
-        <p>内容由系统根据跑批计划生成，可维护多个发送时间点。</p>
+        <strong>提醒日期</strong>
+        <span>单个模板可以在自己的“日期覆盖”里单独跳过或生效，优先级高于这里。</span>
       </div>
-    </div>
-    <div class="reminder-date-panel">
-      <div class="reminder-date-toolbar">
-        <div>
-          <strong>提醒日期</strong>
-          <span>工作日默认提醒，周末和节假日默认不提醒；每个自然日都可手动覆盖。</span>
-        </div>
-        <form class="skip-date-form" method="post" action="{{ url_for('create_scheduler_skip_date') }}">
-          <input type="date" name="skip_date" required aria-label="选择跳过日期">
-          <button type="submit">跳过</button>
-          <button type="submit" class="secondary-button" formaction="{{ url_for('create_scheduler_force_date') }}" name="force_date" data-date-source="skip_date">生效</button>
-        </form>
-      </div>
-      <div class="reminder-date-strip" aria-label="固定提醒日期列表">
-        {% for entry in reminder_dates %}
-          <article class="reminder-date-card {% if entry.is_today %}today{% endif %} {% if entry.is_skipped %}skipped{% endif %}">
-            <div>
-              <strong>{{ entry.day }}</strong>
-              <span>{{ entry.weekday }}{% if entry.is_today %} · 今天{% endif %}</span>
-            </div>
-            {% if entry.is_skipped %}
-              <form method="post" action="{{ url_for('create_scheduler_force_date') }}">
-                <input type="hidden" name="force_date" value="{{ entry.date }}">
-                <button type="submit" class="mini-button secondary-mini">生效</button>
-              </form>
-            {% else %}
-              <form method="post" action="{{ url_for('create_scheduler_skip_date') }}">
-                <input type="hidden" name="skip_date" value="{{ entry.date }}">
-                <button type="submit" class="mini-button">跳过</button>
-              </form>
-            {% endif %}
-          </article>
-        {% endfor %}
-      </div>
-    </div>
-    <div class="scheduler-list">
-      {% if scheduler_times %}
-        {% for reminder in scheduler_times %}
-          <div class="scheduler-row">
-            <div class="scheduler-row-title">
-              <span class="scheduler-index">{{ loop.index }}</span>
-              <div>
-                <strong>{{ reminder.send_time }}</strong>
-                <span>组内重点工作提醒</span>
-              </div>
-            </div>
-            <form class="scheduler-edit-form" method="post" action="{{ url_for('edit_scheduler_time', reminder_id=reminder.id) }}">
-              <label>
-                <span>发送时间</span>
-                <input type="time" name="send_time" value="{{ reminder.send_time }}" required>
-              </label>
-              <div class="scheduler-actions">
-                <button type="submit">保存</button>
-              </div>
-            </form>
-            <form class="scheduler-delete-form" method="post" action="{{ url_for('remove_scheduler_time', reminder_id=reminder.id) }}">
-              <button type="submit" class="danger-button" data-confirm="确认删除这个固定提醒时间？">删除</button>
-            </form>
-          </div>
-        {% endfor %}
-      {% else %}
-        <p class="empty inline-empty">暂无固定提醒时间，请点击“新增时间”添加。</p>
-      {% endif %}
-      <form class="scheduler-add-row" method="post" action="{{ url_for('create_scheduler_time') }}">
-        <input type="hidden" name="send_time" value="{{ current_hour }}:00">
-        <button type="submit" aria-label="新增固定工作提醒时间">
-          <span>+</span>
-          新增时间
-        </button>
+      <form class="skip-date-form" method="post" action="{{ url_for('create_scheduler_skip_date') }}">
+        <input type="date" name="skip_date" required aria-label="选择跳过日期">
+        <button type="submit">跳过</button>
+        <button
+          type="submit"
+          class="secondary-button"
+          formaction="{{ url_for('create_scheduler_force_date') }}"
+          name="force_date"
+          data-date-source="skip_date"
+        >生效</button>
       </form>
     </div>
-  </div>
-
-  <div class="reminder-template-panel">
-    <div class="subsection-heading">
-      <div>
-        <h3>消息模板</h3>
-        <p>管理多个消息模板，启用指定模板用于固定工作提醒；支持变量占位符动态填充数据。</p>
-      </div>
-    </div>
-
-    {# ── Template list ── #}
-    <div class="template-list-section">
-      <div class="template-list-header">
-        <strong>已保存模板</strong>
-      </div>
-      {% if reminder_templates %}
-        <div class="template-list">
-          {% for tpl in reminder_templates %}
-            <div class="template-list-item {% if tpl.is_active %}active{% endif %}">
-              <div class="template-list-item-main">
-                <form method="post" action="{{ url_for('activate_reminder_template', template_id=tpl.id) }}" class="template-activate-form">
-                  <button type="submit" class="template-radio {% if tpl.is_active %}checked{% endif %}" title="{% if tpl.is_active %}当前启用{% else %}点击启用{% endif %}">
-                    {% if tpl.is_active %}<span class="radio-dot"></span>{% endif %}
-                  </button>
-                </form>
-                <div class="template-list-item-info">
-                  <strong>{{ tpl.name }}</strong>
-                  {% if tpl.is_active %}<span class="pill active-pill">启用中</span>{% endif %}
-                </div>
-              </div>
-              <div class="template-list-item-actions">
-                <button type="button" class="link-button" data-load-template data-template-id="{{ tpl.id }}" data-template-content="{{ tpl.template_content | e }}" data-template-name="{{ tpl.name | e }}">加载编辑</button>
-                {% if reminder_templates | length > 1 %}
-                <form method="post" action="{{ url_for('remove_reminder_template', template_id=tpl.id) }}">
-                  <button type="submit" class="link-button danger-text" data-confirm="确认删除模板「{{ tpl.name }}」？">删除</button>
-                </form>
-                {% endif %}
-              </div>
-            </div>
-          {% endfor %}
-        </div>
-      {% else %}
-        <p class="empty inline-empty">暂无模板。</p>
-      {% endif %}
-    </div>
-
-    {# ── Template editor ── #}
-    <form method="post" action="{{ url_for('save_reminder_template') }}" id="template-form" data-template-cache>
-      <input type="hidden" name="template_id" value="{{ active_template_id }}" data-template-id-field>
-      <input type="hidden" name="template_name" value="{% for tpl in reminder_templates %}{% if tpl.is_active %}{{ tpl.name }}{% endif %}{% endfor %}" data-template-name-field>
-      <div class="template-editor">
-        <div class="template-editor-toolbar">
-          <span class="template-editor-label" data-template-display-name>{% for tpl in reminder_templates %}{% if tpl.is_active %}{{ tpl.name }}{% endif %}{% endfor %}</span>
-          <div class="template-editor-actions">
-            <button type="button" class="link-button" data-save-as-template>另存为新模板</button>
+    <div class="reminder-date-strip" aria-label="全局提醒日期列表">
+      {% for entry in reminder_dates %}
+        <article class="reminder-date-card {% if entry.is_today %}today{% endif %} {% if entry.is_skipped %}skipped{% endif %}">
+          <div>
+            <strong>{{ entry.day }}</strong>
+            <span>{{ entry.weekday }}{% if entry.is_today %} · 今天{% endif %}</span>
           </div>
-        </div>
-        <textarea name="template" rows="10" class="template-textarea" placeholder="输入消息模板" data-template-textarea>{{ reminder_template }}</textarea>
-      </div>
-
-      {# ── Collapsible system vars ── #}
-      <details class="template-vars-collapse">
-        <summary class="template-vars-summary">
-          <strong>系统变量</strong>
-          <span class="vars-count">{{ reminder_template_vars | length }} 个</span>
-        </summary>
-        <div class="template-vars-list">
-          {% for var_name, var_desc in reminder_template_vars %}
-            <button type="button" class="template-var-tag" data-insert-var="{{ var_name }}" title="点击插入变量">{ {{ var_name }} }<span>{{ var_desc }}</span></button>
-          {% endfor %}
-        </div>
-      </details>
-
-      {# ── Collapsible doc link vars ── #}
-      <details class="template-vars-collapse">
-        <summary class="template-vars-summary">
-          <strong>文档链接变量</strong>
-          <span class="vars-count">{{ custom_template_vars | length }} 个</span>
-        </summary>
-        <div class="template-vars-list">
-          {% for var in custom_template_vars %}
-            <button type="button" class="template-var-tag" data-insert-var="{{ var.var_name }}" data-var-label="{{ var.var_label }}" title="点击插入变量：{{ var.var_label }}">{ {{ var.var_name }} }<span>{{ var.var_label }}</span></button>
-          {% endfor %}
-          <button type="button" class="template-var-tag template-var-add" data-open-modal="create-template-var" title="新增文档链接变量">+<span>新增变量</span></button>
-        </div>
-      </details>
-
-      <details class="template-vars-collapse">
-        <summary class="template-vars-summary">
-          <strong>样式片段</strong>
-          <span class="vars-count">8 个</span>
-        </summary>
-        <div class="template-vars-list">
-          <button type="button" class="template-var-tag style-snippet" data-insert-snippet="## " title="插入标题">## <span>标题</span></button>
-          <button type="button" class="template-var-tag style-snippet snippet-green" data-insert-snippet="&lt;font color=&quot;info&quot;&gt;文字&lt;/font&gt;" title="绿色文字"><font color="info">Aa</font><span>绿色</span></button>
-          <button type="button" class="template-var-tag style-snippet snippet-orange" data-insert-snippet="&lt;font color=&quot;warning&quot;&gt;文字&lt;/font&gt;" title="橙色文字"><font color="warning">Aa</font><span>橙色</span></button>
-          <button type="button" class="template-var-tag style-snippet snippet-gray" data-insert-snippet="&lt;font color=&quot;comment&quot;&gt;文字&lt;/font&gt;" title="灰色文字"><font color="comment">Aa</font><span>灰色</span></button>
-          <button type="button" class="template-var-tag style-snippet" data-insert-snippet="[文字](链接)" title="插入链接">[]<span>链接</span></button>
-          <button type="button" class="template-var-tag style-snippet" data-insert-snippet="&lt;@all&gt;" title="@所有人">@<span>全体</span></button>
-          <button type="button" class="template-var-tag style-snippet" data-insert-snippet="- " title="列表项">-<span>列表</span></button>
-          <button type="button" class="template-var-tag style-snippet" data-insert-snippet="> " title="引用">><span>引用</span></button>
-        </div>
-      </details>
-
-      <div class="template-actions">
-        <button type="submit">保存模板</button>
-        <button type="button" class="secondary-button" data-preview-template>预览效果</button>
-        <button type="button" class="secondary-button" data-test-send title="始终发送到自测群机器人">测试发送</button>
-      </div>
-    </form>
-
-
+          {% if entry.is_skipped %}
+            <form method="post" action="{{ url_for('create_scheduler_force_date') }}">
+              <input type="hidden" name="force_date" value="{{ entry.date }}">
+              <button type="submit" class="mini-button secondary-mini">生效</button>
+            </form>
+          {% else %}
+            <form method="post" action="{{ url_for('create_scheduler_skip_date') }}">
+              <input type="hidden" name="skip_date" value="{{ entry.date }}">
+              <button type="submit" class="mini-button">跳过</button>
+            </form>
+          {% endif %}
+        </article>
+      {% endfor %}
+    </div>
   </div>
+</section>
 
-  {# ── Create template modal ── #}
-
-
+<section class="board doc-link-board">
   <div class="doc-link-vars-panel">
     <div class="subsection-heading">
       <div>
         <h3>公共文档链接</h3>
-        <p>管理公共文档链接变量，消息模板和自定义通知都可引用。</p>
+        <p>管理公共文档链接变量，所有机器人的消息模板都可以用 <code>{变量名}</code> 引用。</p>
       </div>
       <button type="button" class="link-button" data-open-modal="create-template-var">+ 新增变量</button>
     </div>
@@ -230,158 +79,40 @@
         </div>
       {% endif %}
     {% else %}
-      <p class="empty inline-empty">暂无公共文档链接变量，请点击"新增变量"添加。</p>
+      <p class="empty inline-empty">暂无公共文档链接变量，请点击“新增变量”添加。</p>
     {% endif %}
   </div>
-
-  <dialog class="modal" id="all-doc-link-vars">
-    <div class="modal-card">
-      <div class="modal-header">
-        <h3>全部公共文档链接</h3>
-        <button type="button" class="icon-button" data-close-modal="all-doc-link-vars" aria-label="关闭">×</button>
-      </div>
-      <div class="modal-search">
-        <input type="text" id="doc-link-var-search" placeholder="搜索变量名或描述..." class="modal-search-input">
-      </div>
-      <div class="modal-content">
-        <div class="doc-link-var-table" id="all-doc-link-var-list">
-          {% for var in custom_template_vars %}
-            <div class="doc-link-var-table-row" data-var-name="{{ var.var_name | lower }}" data-var-label="{{ var.var_label | lower }}">
-              <form method="post" action="{{ url_for('edit_template_var', var_id=var.id) }}" class="doc-link-var-edit-form">
-                <input name="var_name" value="{{ var.var_name }}" class="template-var-input" data-auto-varname placeholder="变量名">
-                <input name="var_label" value="{{ var.var_label }}" class="template-var-input" data-var-label-source placeholder="描述">
-                <input name="var_value" value="{{ var.var_value }}" class="template-var-input" placeholder="链接（留空用 .env）">
-                <button type="submit">保存</button>
-              </form>
-              <form method="post" action="{{ url_for('remove_template_var', var_id=var.id) }}">
-                <button type="submit" class="danger-button" data-confirm="确认删除变量 { {{ var.var_name }} }？">删除</button>
-              </form>
-            </div>
-          {% endfor %}
-        </div>
-        <p class="empty inline-empty" id="doc-link-var-no-results" style="display: none;">未找到匹配的变量</p>
-      </div>
-    </div>
-  </dialog>
-
-  <div class="custom-notification-panel">
-    <div class="subsection-heading">
-      <div>
-        <h3>自定义通知</h3>
-        <p>维护需要按固定时间发送到群里的业务提醒。</p>
-      </div>
-    </div>
-    <div class="notification-list">
-      {% if notification_tasks %}
-        {% for task in notification_tasks %}
-          <article class="notification-item">
-            <div class="notification-card-header">
-              <div>
-                <div class="notification-title">
-                  <strong>{{ task.title }}</strong>
-                  <span>{{ task.send_time }}</span>
-                  {% if task.at_all == "true" %}
-                    <span class="pill"> @所有人 </span>
-                  {% endif %}
-                </div>
-                <p>{{ task.content }}</p>
-                {% if task.doc_links %}
-                  <span class="doc-count">{{ task.doc_links | length }} 个文档链接</span>
-                {% endif %}
-              </div>
-              <div class="notification-actions">
-                <form method="post" action="{{ url_for('send_notification_now', index=task.id) }}">
-                  <button type="submit" class="link-button" data-confirm="确认立即发送这条消息通知？">立即发送</button>
-                </form>
-                <button type="button" class="link-button" data-open-modal="edit-notification-{{ task.id }}">修改</button>
-                <form method="post" action="{{ url_for('remove_notification', index=task.id) }}">
-                  <button type="submit" class="link-button danger-text" data-confirm="确认删除这条消息通知？">删除</button>
-                </form>
-              </div>
-            </div>
-            <div class="date-rule-panel" aria-label="{{ task.title }} 日期规则">
-              <form method="post" action="{{ url_for('edit_notification_date_rule', index=task.id) }}">
-                <span class="date-rule-label">发送范围</span>
-                <button
-                  type="submit"
-                  name="date_rule"
-                  value="all"
-                  class="date-rule-button {% if task.date_rule == 'all' %}active{% endif %}"
-                >所有自然日</button>
-                <button
-                  type="submit"
-                  name="date_rule"
-                  value="business_day"
-                  class="date-rule-button {% if task.date_rule == 'business_day' %}active{% endif %}"
-                >跳过周末和节假日</button>
-                <button
-                  type="submit"
-                  name="date_rule"
-                  value="holiday_only"
-                  class="date-rule-button {% if task.date_rule == 'holiday_only' %}active{% endif %}"
-                >仅跳过节假日</button>
-              </form>
-            </div>
-          </article>
-        {% endfor %}
-      {% else %}
-        <p class="empty inline-empty">暂无自定义消息通知，请点击“新增通知”添加。</p>
-      {% endif %}
-      <button type="button" class="notification-add-row" data-open-modal="create-notification">
-        <span>+</span>
-        新增通知
-      </button>
-      {% if notification_pagination.total_pages > 1 %}
-        <nav class="pagination compact-pagination" aria-label="自定义通知分页">
-          {% if notification_pagination.has_prev %}
-            <a class="ghost-button" href="{{ url_for('notification_page', notification_page=notification_pagination.prev_page) }}">上一页</a>
-          {% endif %}
-          <span>第 {{ notification_pagination.page }} / {{ notification_pagination.total_pages }} 页，共 {{ notification_pagination.total }} 条</span>
-          {% if notification_pagination.has_next %}
-            <a class="ghost-button" href="{{ url_for('notification_page', notification_page=notification_pagination.next_page) }}">下一页</a>
-          {% endif %}
-        </nav>
-      {% endif %}
-    </div>
-  </div>
-  <dialog class="modal" id="template-preview-modal">
-    <div class="modal-card template-preview-card">
-      <div class="modal-header">
-        <h3>模板预览</h3>
-        <button type="button" class="icon-button" data-close-modal="template-preview-modal" aria-label="关闭">×</button>
-      </div>
-      <div class="template-preview-container">
-        <div class="wecom-chat-bubble">
-          <div class="wecom-message" id="template-preview-content"></div>
-        </div>
-      </div>
-      <div class="template-preview-hint">
-        <p>预览效果仅供参考，实际显示以企业微信客户端为准</p>
-      </div>
-    </div>
-  </dialog>
 </section>
 
-{% set modal_id = "create-notification" %}
-{% set modal_title = "新增消息通知" %}
-{% set form_action = url_for('create_notification') %}
-{% set task = {
-  "title": "",
-  "content": "",
-  "doc_url": "",
-  "doc_links": [],
-  "send_time": current_time,
-  "at_all": "",
-  "date_rule": "business_day"
-} %}
-{% include "_notification_modal.html" %}
-
-{% for task in notification_tasks %}
-  {% set modal_id = "edit-notification-" ~ task.id %}
-  {% set modal_title = "修改消息通知" %}
-  {% set form_action = url_for('edit_notification', index=task.id) %}
-  {% include "_notification_modal.html" %}
-{% endfor %}
+<dialog class="modal" id="all-doc-link-vars">
+  <div class="modal-card">
+    <div class="modal-header">
+      <h3>全部公共文档链接</h3>
+      <button type="button" class="icon-button" data-close-modal="all-doc-link-vars" aria-label="关闭">×</button>
+    </div>
+    <div class="modal-search">
+      <input type="text" id="doc-link-var-search" placeholder="搜索变量名或描述..." class="modal-search-input">
+    </div>
+    <div class="modal-content">
+      <div class="doc-link-var-table" id="all-doc-link-var-list">
+        {% for var in custom_template_vars %}
+          <div class="doc-link-var-table-row" data-var-name="{{ var.var_name | lower }}" data-var-label="{{ var.var_label | lower }}">
+            <form method="post" action="{{ url_for('edit_template_var', var_id=var.id) }}" class="doc-link-var-edit-form">
+              <input name="var_name" value="{{ var.var_name }}" class="template-var-input" data-auto-varname placeholder="变量名">
+              <input name="var_label" value="{{ var.var_label }}" class="template-var-input" data-var-label-source placeholder="描述">
+              <input name="var_value" value="{{ var.var_value }}" class="template-var-input" placeholder="链接（留空用 .env）">
+              <button type="submit">保存</button>
+            </form>
+            <form method="post" action="{{ url_for('remove_template_var', var_id=var.id) }}">
+              <button type="submit" class="danger-button" data-confirm="确认删除变量 { {{ var.var_name }} }？">删除</button>
+            </form>
+          </div>
+        {% endfor %}
+      </div>
+      <p class="empty inline-empty" id="doc-link-var-no-results" style="display: none;">未找到匹配的变量</p>
+    </div>
+  </div>
+</dialog>
 
 <dialog class="modal" id="create-template-var">
   <form class="modal-card" method="post" action="{{ url_for('create_template_var') }}">
