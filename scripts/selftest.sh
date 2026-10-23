@@ -69,6 +69,12 @@ AGENDA_DOC_URL=https://doc.weixin.qq.com/sheet/selftest-agenda
 FRONTEND_URL=http://127.0.0.1:$WEB_PORT
 LOCAL_STATUS_FILE=$WORKDIR/sample_status.json
 QWBOT_DB_PATH=$WORKDIR/qwbot.sqlite3
+# SEC-01: the panel is login-guarded; the harness authenticates with this password.
+QWBOT_WEB_PASSWORD=selftest-panel-password
+# SEC-03: the mock webhook runs on 127.0.0.1, so local targets are explicitly allowed
+# here (and only here) together with the mock host itself.
+QWBOT_ALLOW_INSECURE_LOCAL_WEBHOOKS=1
+QWBOT_ALLOWED_WEBHOOK_HOSTS=127.0.0.1,host.docker.internal
 EOF
 
   echo "[*] starting mock webhook on :$MOCK_PORT"
@@ -92,6 +98,7 @@ EOF
     --base-url "http://127.0.0.1:$WEB_PORT" \
     --mock-url "http://127.0.0.1:$MOCK_PORT" \
     --db "$WORKDIR/qwbot.sqlite3" \
+    --password "${QWBOT_WEB_PASSWORD:-selftest-panel-password}" \
     --cli-command "$PYTHON -m qwbot.cli"
 }
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 from pathlib import Path
@@ -10,7 +11,6 @@ from qwbot import store
 from qwbot.config import Settings
 from qwbot.message import render_message_template, settings_url_map
 from tests.conftest import MOCK_PROD_URL, MOCK_TEST_URL, init_db, make_settings
-
 
 # ---------------------------------------------------------------------------
 # Golden reference: the pre-QWB-002 custom-notification builder.
@@ -445,6 +445,68 @@ def test_pre_release_webhook_schema_is_upgraded_on_open(
             "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'template_schedules'"
         ).fetchone()[0]
     assert "message_templates" in sql and "reminder_templates" not in sql
+
+
+def test_legacy_status_file_bootstraps_in_one_transaction(
+    db_path: Path, tmp_path: Path
+) -> None:
+    """First-run bootstrap from `sample_status.json` must not slow down per row (P1).
+
+    Before the fix every migrated row cost its own connection + commit; here the whole
+    file lands in a single write transaction and the rows come out identical.
+    """
+    status_file = tmp_path / "sample_status.json"
+    status_file.write_text(
+        json.dumps(
+            {
+                "batch_plan": [
+                    {"content": f"第{i}批", "natural_date": f"2026-09-{i:02d}", "date": f"2026-09-{i:02d}"}
+                    for i in range(1, 31)
+                ],
+                "progress": [{"content": f"事项{i}", "owner": "张三"} for i in range(1, 11)],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    real_connect = sqlite3.connect
+    calls: list[str] = []
+
+    def counting_connect(*args: object, **kwargs: object) -> sqlite3.Connection:
+        calls.append("connect")
+        return real_connect(*args, **kwargs)  # type: ignore[arg-return]
+
+    sqlite3.connect = counting_connect  # type: ignore[assignment]
+    try:
+        store.init_store(db_path, status_file)
+    finally:
+        sqlite3.connect = real_connect  # type: ignore[assignment]
+
+    payload = store.load_status_file(db_path)
+    assert len(payload["batch_plan"]) == 30
+    assert len(payload["progress"]) == 10
+    assert payload["batch_plan"][0]["natural_date"] == "2026-09-01"
+    assert payload["batch_plan"][29]["content"] == "第30批"
+    # One pass per collection would be 2 writes; before the fix it was 40 (+ schema reads).
+    write_passes = len(calls)
+    assert write_passes < 10, f"bootstrap still opens {write_passes} connections"
+
+
+def test_bootstrap_skips_a_database_that_already_has_rows(
+    db_path: Path, tmp_path: Path
+) -> None:
+    """Migration only fills an empty store — existing data is never duplicated."""
+    status_file = tmp_path / "sample_status.json"
+    status_file.write_text(
+        json.dumps({"batch_plan": [{"content": "第一批", "date": "2026-09-01"}]}),
+        encoding="utf-8",
+    )
+    store.init_store(db_path, status_file)
+    assert len(store.load_status_file(db_path)["batch_plan"]) == 1
+
+    store.init_store(db_path, status_file)
+    assert len(store.load_status_file(db_path)["batch_plan"]) == 1
 
 
 def test_healthy_database_is_left_alone(db_path: Path) -> None:

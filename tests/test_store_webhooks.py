@@ -393,11 +393,27 @@ def test_import_env_webhooks_skips_existing_urls(db_path: Path) -> None:
     init_db(db_path, settings)
     before = store.count_webhooks(db_path)
 
-    assert store.import_env_webhooks(db_path, settings.webhook_seeds(), "test") == 0
+    assert (
+        store.import_env_webhooks(
+            db_path,
+            settings.webhook_seeds(),
+            "test",
+            allowed_hosts=settings.allowed_webhook_hosts,
+        )
+        == 0
+    )
     assert store.count_webhooks(db_path) == before
 
     store.delete_webhook(db_path, int(store.list_webhooks(db_path)[0]["id"]))
-    assert store.import_env_webhooks(db_path, settings.webhook_seeds(), "test") == 1
+    assert (
+        store.import_env_webhooks(
+            db_path,
+            settings.webhook_seeds(),
+            "test",
+            allowed_hosts=settings.allowed_webhook_hosts,
+        )
+        == 1
+    )
 
 
 def test_import_env_webhooks_without_seeds_is_a_noop(db_path: Path) -> None:
@@ -437,3 +453,177 @@ def test_date_override_upsert_keeps_single_row(db_path: Path) -> None:
 
     store.delete_template_date_override(db_path, template_id, "2026-10-01")
     assert overrides() == {"skip": [], "force": []}
+
+
+# ---------------------------------------------------------------------------
+# P1-P4 store layer: single-row reads, one-transaction writes, indexes
+# ---------------------------------------------------------------------------
+
+
+def test_update_item_rejects_a_missing_row_for_every_collection(db_path: Path) -> None:
+    """The narrow read behind `update_item` keeps the old IndexError contract (P3)."""
+    store.init_store(db_path)
+    for collection in ("batch_plan", "progress", "notification_tasks"):
+        with pytest.raises(IndexError):
+            store.update_item(db_path, collection, 999_999, {"content": "x"})
+
+
+def test_update_item_preserves_execution_metadata_not_in_the_payload(db_path: Path) -> None:
+    """A partial update must not wipe started_at / execution_seconds (P3 regression)."""
+    store.init_store(db_path)
+    index = store.add_item(
+        db_path,
+        "batch_plan",
+        {"content": "第一批", "natural_date": "2026-09-10", "started_at": "2026-09-10T10:00:00",
+         "execution_seconds": "42"},
+    )
+
+    store.update_item(db_path, "batch_plan", index, {"content": "改名了"})
+
+    item = store.get_item(db_path, "batch_plan", index)
+    assert item["content"] == "改名了"
+    assert item["started_at"] == "2026-09-10T10:00:00"
+    assert item["execution_seconds"] == "42"
+
+
+def test_get_item_and_load_status_file_agree_on_every_collection(db_path: Path) -> None:
+    """Single-row reads return exactly the same dicts as the table-wide loader (P3)."""
+    store.init_store(db_path)
+    batch = store.add_item(db_path, "batch_plan", {"content": "批", "natural_date": "2026-09-10"})
+    progress = store.add_item(db_path, "progress", {"content": "事项", "owner": "李四"})
+    task = store.add_item(db_path, "notification_tasks", {"title": "日报", "doc_url": "https://a/x"})
+    store.add_block_event(db_path, batch, "上游未就绪", "2026-09-10T09:00:00")
+
+    payload = store.load_status_file(db_path)
+    for collection, index in (("batch_plan", batch), ("progress", progress), ("notification_tasks", task)):
+        listed = next(item for item in payload[collection] if int(item["id"]) == index)
+        assert store.get_item(db_path, collection, index) == listed
+
+
+def test_legacy_table_without_newer_columns_still_loads(db_path: Path) -> None:
+    """Reads name their columns, so a truncated legacy table is not fatal (P4 safety)."""
+    import sqlite3
+
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            "CREATE TABLE batch_plan (id INTEGER PRIMARY KEY AUTOINCREMENT, content TEXT,"
+            " date TEXT, natural_date TEXT)"
+        )
+        connection.execute("INSERT INTO batch_plan (content, date, natural_date) VALUES ('旧', '2026-01-01', '2026-01-01')")
+        connection.commit()
+
+    store.reset_schema_cache(db_path)
+    items = store.load_status_file(db_path)["batch_plan"]
+    assert items[0]["content"] == "旧"
+    assert items[0]["block_events"] == []
+    assert store.get_item(db_path, "batch_plan", 1)["natural_date"] == "2026-01-01"
+
+
+# ---------------------------------------------------------------------------
+# B-1: the bulk write path must clean exactly like the single-row path
+# ---------------------------------------------------------------------------
+
+NOTIFICATION_SAMPLE = {
+    "title": "日报",
+    "content": "正文",
+    "doc_url": '[{"label":"方案","url":"https://doc.weixin.qq.com/sheet/a"},{"label":"纪要","url":"https://doc.weixin.qq.com/doc/b"}]',
+    "send_time": "09:30",
+    "at_all": "true",
+    "date_rule": "business_day",
+}
+
+BATCH_SAMPLE = {
+    "content": "第一批",
+    "natural_date": "2026-09-10",
+    "date": "2026-09-10",
+    "batch_start_time": "15:00",
+    "execution_status": "待执行",
+    "status": "待执行",
+    "holiday_flag": "N",
+}
+
+PROGRESS_SAMPLE = {"content": "事项", "owner": "张三", "status": "进行中", "category": "核算"}
+
+
+def _comparable(item: dict) -> dict:
+    """Drop the autoincrement id, which legitimately differs between two writes."""
+    return {key: value for key, value in item.items() if key != "id"}
+
+
+@pytest.mark.parametrize(
+    "collection,sample",
+    [
+        ("notification_tasks", NOTIFICATION_SAMPLE),
+        ("batch_plan", BATCH_SAMPLE),
+        ("progress", PROGRESS_SAMPLE),
+    ],
+)
+def test_write_items_inserts_exactly_like_add_item(db_path: Path, collection: str, sample: dict) -> None:
+    """P1 parity (B-1): `write_items` must not silently drop fields `add_item` keeps.
+
+    The regression was real for `notification_tasks`: the bulk path ran every collection
+    through `_clean_item`, which speaks batch-plan vocabulary and knows nothing about
+    `title` / `doc_url` / `at_all` / `date_rule`, so document links stored as ''.
+    """
+    store.init_store(db_path)
+
+    single = store.add_item(db_path, collection, dict(sample))
+    bulk_ids, updated = store.write_items(db_path, collection, inserts=[dict(sample)])
+
+    assert updated == 0
+    assert len(bulk_ids) == 1
+    assert _comparable(store.get_item(db_path, collection, bulk_ids[0])) == _comparable(
+        store.get_item(db_path, collection, single)
+    )
+
+
+def test_write_items_notification_keeps_doc_links_and_schedule_rule(db_path: Path) -> None:
+    """The concrete B-1 payload: doc links, at_all and date_rule survive a bulk insert."""
+    store.init_store(db_path)
+
+    ids, _ = store.write_items(db_path, "notification_tasks", inserts=[dict(NOTIFICATION_SAMPLE)])
+    item = store.get_item(db_path, "notification_tasks", ids[0])
+
+    assert [link["url"] for link in item["doc_links"]] == [
+        "https://doc.weixin.qq.com/sheet/a",
+        "https://doc.weixin.qq.com/doc/b",
+    ]
+    assert item["at_all"] == "true"
+    assert item["date_rule"] == "business_day"
+    assert item["title"] == "日报"
+
+
+@pytest.mark.parametrize(
+    "collection,sample",
+    [
+        ("notification_tasks", NOTIFICATION_SAMPLE),
+        ("batch_plan", BATCH_SAMPLE),
+        ("progress", PROGRESS_SAMPLE),
+    ],
+)
+def test_write_items_updates_exactly_like_update_item(
+    db_path: Path, collection: str, sample: dict
+) -> None:
+    """Reverse direction of B-1: the updates branch shares the single-row cleaner too."""
+    store.init_store(db_path)
+    # `notification_tasks` keys its display value off `title`; the other two use `content`.
+    seed = {"title": "占位"} if collection == "notification_tasks" else {"content": "占位"}
+    via_single = store.add_item(db_path, collection, dict(seed))
+    via_bulk = store.add_item(db_path, collection, dict(seed))
+
+    revised = {**sample, "content": "改过了"}
+    store.update_item(db_path, collection, via_single, dict(revised))
+    _, updated = store.write_items(db_path, collection, updates=[(via_bulk, dict(revised))])
+
+    assert updated == 1
+    assert _comparable(store.get_item(db_path, collection, via_bulk)) == _comparable(
+        store.get_item(db_path, collection, via_single)
+    )
+
+
+def test_collection_cleaner_dispatches_per_collection() -> None:
+    """Unit guard on the dispatch itself, so a future refactor cannot re-hardcode it."""
+    assert store._collection_cleaner("notification_tasks") is store._clean_notification_task
+    assert store._collection_cleaner("batch_plan") is store._clean_item
+    assert store._collection_cleaner("progress") is store._clean_item

@@ -2091,3 +2091,10 @@ button:hover {
     justify-content: flex-start;
   }
 }
+
+
+/* SEC-01: login / logout affordance inside the page navigation. */
+.inline-auth-form {
+  display: inline-flex;
+  margin: 0;
+}

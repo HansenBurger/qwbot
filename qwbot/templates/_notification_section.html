@@ -13,6 +13,7 @@
         <span>单个模板可以在自己的“日期覆盖”里单独跳过或生效，优先级高于这里。</span>
       </div>
       <form class="skip-date-form" method="post" action="{{ url_for('create_scheduler_skip_date') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <input type="date" name="skip_date" required aria-label="选择跳过日期">
         <button type="submit">跳过</button>
         <button
@@ -33,11 +34,13 @@
           </div>
           {% if entry.is_skipped %}
             <form method="post" action="{{ url_for('create_scheduler_force_date') }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
               <input type="hidden" name="force_date" value="{{ entry.date }}">
               <button type="submit" class="mini-button secondary-mini">生效</button>
             </form>
           {% else %}
             <form method="post" action="{{ url_for('create_scheduler_skip_date') }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
               <input type="hidden" name="skip_date" value="{{ entry.date }}">
               <button type="submit" class="mini-button">跳过</button>
             </form>
@@ -59,6 +62,7 @@
       </p>
     </div>
     <form class="batch-notify-toggle" method="post" action="{{ url_for('update_batch_event_notify') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <input type="hidden" name="enabled" value="{{ 'false' if batch_notify_enabled else 'true' }}">
       <span class="pill {{ 'holiday-N' if batch_notify_enabled else 'off-pill' }}">
         {{ '已开启' if batch_notify_enabled else '已关闭' }}
@@ -89,12 +93,14 @@
         {% for var in custom_template_vars[:5] %}
           <div class="doc-link-var-table-row">
             <form method="post" action="{{ url_for('edit_template_var', var_id=var.id) }}" class="doc-link-var-edit-form">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
               <input name="var_name" value="{{ var.var_name }}" class="template-var-input" data-auto-varname placeholder="变量名">
               <input name="var_label" value="{{ var.var_label }}" class="template-var-input" data-var-label-source placeholder="描述">
               <input name="var_value" value="{{ var.var_value }}" class="template-var-input" placeholder="链接（留空用 .env）">
               <button type="submit">保存</button>
             </form>
             <form method="post" action="{{ url_for('remove_template_var', var_id=var.id) }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
               <button type="submit" class="danger-button" data-confirm="确认删除变量 { {{ var.var_name }} }？">删除</button>
             </form>
           </div>
@@ -125,12 +131,14 @@
         {% for var in custom_template_vars %}
           <div class="doc-link-var-table-row" data-var-name="{{ var.var_name | lower }}" data-var-label="{{ var.var_label | lower }}">
             <form method="post" action="{{ url_for('edit_template_var', var_id=var.id) }}" class="doc-link-var-edit-form">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
               <input name="var_name" value="{{ var.var_name }}" class="template-var-input" data-auto-varname placeholder="变量名">
               <input name="var_label" value="{{ var.var_label }}" class="template-var-input" data-var-label-source placeholder="描述">
               <input name="var_value" value="{{ var.var_value }}" class="template-var-input" placeholder="链接（留空用 .env）">
               <button type="submit">保存</button>
             </form>
             <form method="post" action="{{ url_for('remove_template_var', var_id=var.id) }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
               <button type="submit" class="danger-button" data-confirm="确认删除变量 { {{ var.var_name }} }？">删除</button>
             </form>
           </div>
@@ -143,6 +151,7 @@
 
 <dialog class="modal" id="create-template-var">
   <form class="modal-card" method="post" action="{{ url_for('create_template_var') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <div class="modal-header">
       <h3>新增文档链接变量</h3>
       <button type="button" class="icon-button" data-close-modal="create-template-var" aria-label="关闭">×</button>

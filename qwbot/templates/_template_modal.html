@@ -1,5 +1,6 @@
 <dialog class="modal" id="{{ modal_id }}">
   <form class="modal-card template-modal-card" method="post" action="{{ form_action }}" data-template-form>
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <div class="modal-header">
       <h3>{{ modal_title }}</h3>
       <button type="button" class="icon-button" data-close-modal="{{ modal_id }}" aria-label="关闭">×</button>

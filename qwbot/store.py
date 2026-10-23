@@ -1,13 +1,72 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
+
+_logger = logging.getLogger("qwbot.store")
 
 COLLECTIONS = {"batch_plan", "progress", "notification_tasks"}
+_TABLE_BY_COLLECTION = {
+    "batch_plan": "batch_plan",
+    "progress": "progress",
+    "notification_tasks": "notification_tasks",
+}
+
+
+class _SchemaCache:
+    """Which database files this process has already brought up to date (P2).
+
+    `_ensure_schema` is idempotent but costs ~27 SQL statements, and it used to run at
+    every one of the 46 store entry points — 11+ SQLite connections per web request. A
+    process only needs the DDL once per database file, so remember which ones are current.
+
+    * Keyed by resolved absolute path, so a second database in the same process still gets
+      its own pass. `web`/`cli` bind their `db_path` once at startup, so the key set stays
+      small and stable.
+    * It tracks **paths**, not file contents. Swapping a new file in behind the same path
+      (restoring a backup, or a test reusing a location) must call `reset_schema_cache()`;
+      otherwise the replacement is assumed current.
+    * Seeding is never skipped: `_ensure_schema(path, webhook_seeds=...)` always runs the
+      full pass, because seeding/migration is data work rather than DDL. A database written
+      by another version therefore still gets re-checked by the first `init_store()`.
+
+    Skipping our own DDL is what makes this cheap. A concurrent writer creating a table we
+    have not created yet would surface as `no such table`, which cannot happen in the
+    supported single-writer deployment.
+    """
+
+    def __init__(self) -> None:
+        self._ready: set[str] = set()
+
+    def __contains__(self, key: str) -> bool:
+        return key in self._ready
+
+    def add(self, key: str) -> None:
+        self._ready.add(key)
+
+    def forget(self, key: str) -> None:
+        self._ready.discard(key)
+
+    def clear(self) -> None:
+        self._ready.clear()
+
+
+_SCHEMA_READY = _SchemaCache()
+
+
+def reset_schema_cache(path: Path | None = None) -> None:
+    """Drop the "already current" mark for one database, or for all of them."""
+    if path is None:
+        _SCHEMA_READY.clear()
+        return
+    _SCHEMA_READY.forget(_schema_key(path))
+
+
 DEFAULT_SCHEDULER_TIMES = {
     "morning-reminder": "09:00",
     "evening-reminder": "18:00",
@@ -74,6 +133,15 @@ PROGRESS_FIELDS = ["content", "owner", "status", "category", "date"]
 NOTIFICATION_FIELDS = ["title", "content", "doc_url", "send_time", "at_all", "date_rule"]
 
 
+def _item_fields(collection: str) -> list[str]:
+    """The columns each collection's item dict maps."""
+    if collection == "batch_plan":
+        return BATCH_FIELDS
+    if collection == "progress":
+        return PROGRESS_FIELDS
+    return NOTIFICATION_FIELDS
+
+
 def init_store(
     db_path: Path,
     migration_path: Path | None = None,
@@ -84,23 +152,30 @@ def init_store(
     if migration_path and migration_path.exists() and _is_empty(db_path):
         with migration_path.open("r", encoding="utf-8") as file:
             payload = json.load(file)
-        for item in _normalize_collection(payload.get("batch_plan")):
-            add_item(db_path, "batch_plan", item)
-        for item in _normalize_collection(payload.get("progress")):
-            add_item(db_path, "progress", item)
+        # P1: bootstrap the whole legacy status file in one transaction instead of one
+        # connection + commit per row.
+        insert_items(db_path, "batch_plan", _normalize_collection(payload.get("batch_plan")))
+        insert_items(db_path, "progress", _normalize_collection(payload.get("progress")))
 
 
 def load_status_file(path: Path) -> dict[str, list[dict[str, Any]]]:
+    """Return the whole status payload.
+
+    P2: every section is read over ONE connection instead of seven (nine before the
+    schema pass was cached too). The per-section helpers keep their own `path` entry
+    points for callers that only need one section.
+    """
     _ensure_schema(path)
-    return {
-        "batch_plan": _load_batch_plan(path),
-        "progress": _load_progress(path),
-        "notification_tasks": _load_notification_tasks(path),
-        "scheduler_times": _load_scheduler_times(path),
-        "scheduler_skip_dates": _load_scheduler_skip_dates(path),
-        "scheduler_force_dates": _load_scheduler_force_dates(path),
-        "template_vars": get_template_vars(path),
-    }
+    with _connect(path) as connection:
+        return {
+            "batch_plan": _read_batch_plan(connection),
+            "progress": _read_progress(connection),
+            "notification_tasks": _read_notification_tasks(connection),
+            "scheduler_times": _read_scheduler_times(connection),
+            "scheduler_skip_dates": _read_scheduler_skip_dates(connection),
+            "scheduler_force_dates": _read_scheduler_force_dates(connection),
+            "template_vars": _read_template_vars(connection),
+        }
 
 
 def add_item(path: Path, collection: str, item: dict[str, str]) -> int:
@@ -117,17 +192,11 @@ def add_item(path: Path, collection: str, item: dict[str, str]) -> int:
 def update_item(path: Path, collection: str, index: int, item: dict[str, str]) -> None:
     _ensure_collection(collection)
     _ensure_schema(path)
-    existing_item = get_item(path, collection, index)
+    # Only these keys are consulted, so a single-row read is enough (P3) — no block events,
+    # no doc-link parsing, no other rows.
+    existing_item = _get_existing_fields(path, collection, index)
     updated_item = _clean_item(item)
-    for key in [
-        "archived",
-        "archived_on",
-        "completed_on",
-        "started_on",
-        "started_at",
-        "completed_at",
-        "execution_seconds",
-    ]:
+    for key in KEEP_ON_UPDATE_KEYS:
         if key not in item and existing_item.get(key):
             updated_item[key] = existing_item[key]
     with _connect(path) as connection:
@@ -139,14 +208,38 @@ def update_item(path: Path, collection: str, index: int, item: dict[str, str]) -
             _update_notification_task(connection, index, _clean_notification_task(item))
 
 
+KEEP_ON_UPDATE_KEYS = (
+    "archived",
+    "archived_on",
+    "completed_on",
+    "started_on",
+    "started_at",
+    "completed_at",
+    "execution_seconds",
+)
+
+
+def _get_existing_fields(path: Path, collection: str, index: int) -> dict[str, Any]:
+    """The stored values `update_item` needs to preserve, read as one narrow row.
+
+    Only `batch_plan` has these columns, so progress/notification updates pay a bare
+    existence check and get an empty dict back.
+    """
+    wanted = [key for key in KEEP_ON_UPDATE_KEYS if key in _item_fields(collection)]
+    columns = ", ".join(["id", *wanted])
+    with _connect(path) as connection:
+        row = connection.execute(
+            f"SELECT {columns} FROM {_TABLE_BY_COLLECTION[collection]} WHERE id = ?", (index,)
+        ).fetchone()
+        if row is None:
+            raise IndexError(f"Item index out of range: {index}")
+        return {key: _row_text(row, key) for key in wanted}
+
+
 def delete_item(path: Path, collection: str, index: int) -> None:
     _ensure_collection(collection)
     _ensure_schema(path)
-    table = {
-        "batch_plan": "batch_plan",
-        "progress": "progress",
-        "notification_tasks": "notification_tasks",
-    }[collection]
+    table = _TABLE_BY_COLLECTION[collection]
     with _connect(path) as connection:
         if collection == "notification_tasks":
             connection.execute("DELETE FROM notification_date_overrides WHERE notification_task_id = ?", (index,))
@@ -156,12 +249,84 @@ def delete_item(path: Path, collection: str, index: int) -> None:
 
 
 def get_item(path: Path, collection: str, index: int) -> dict[str, Any]:
+    """Return one item by id.
+
+    P3: this used to call `load_status_file()` — a full-table read plus the Python-side
+    conversion of every row and block event — just to pick one item out. A web request
+    that edited/started/completed a batch paid ~60 ms for it. Now it is a single-row
+    lookup with only that batch's block events, which keeps the returned shape identical
+    to what `_load_batch_plan` produces per item.
+    """
     _ensure_collection(collection)
-    payload = load_status_file(path)
-    for item in payload[collection]:
-        if int(item["id"]) == index:
-            return item
-    raise IndexError(f"Item index out of range: {index}")
+    _ensure_schema(path)
+    events_by_batch: dict[int, list[dict[str, Any]]] | None = None
+    overrides: dict[int, dict[str, list[str]]] | None = None
+    with _connect(path) as connection:
+        row = connection.execute(
+            f"SELECT {_select_list(connection, collection)} FROM {_TABLE_BY_COLLECTION[collection]} WHERE id = ?",
+            (index,),
+        ).fetchone()
+        if row is None:
+            raise IndexError(f"Item index out of range: {index}")
+        if collection == "batch_plan":
+            events_by_batch = _load_block_events(connection, batch_plan_id=index)
+        elif collection == "notification_tasks":
+            overrides = _load_notification_date_overrides(connection, notification_task_id=index)
+    return _item_from_row(collection, row, events_by_batch, overrides)
+
+
+def _row_text(row: sqlite3.Row, field: str) -> str:
+    """Value of `field` as text, or '' when the table predates that column.
+
+    `sqlite3.Row.keys()` is the only supported way to ask a row what it carries; the
+    membership test reads those keys rather than the mapping itself.
+    """
+    return _stringify(row[field]) if field in row.keys() else ""  # noqa: SIM118
+
+
+def _select_list(connection: sqlite3.Connection, collection: str) -> str:
+    """Columns to read for `collection`: its mapped fields that the table actually has.
+
+    Naming columns instead of `SELECT *` keeps a legacy or hand-restored table readable —
+    `_row_text` turns an absent field into ''. A truncated table can only arrive by
+    restoring an old file over a fresh path, which already needs `reset_schema_cache()` to
+    re-run the schema pass.
+    """
+    available = _table_columns(connection, collection)
+    return ", ".join(
+        ["id"] + [field for field in _item_fields(collection) if field in available]
+    )
+
+
+def _item_from_row(
+    collection: str,
+    row: sqlite3.Row,
+    events_by_batch: dict[int, list[dict[str, Any]]] | None = None,
+    overrides: dict[int, dict[str, list[str]]] | None = None,
+) -> dict[str, Any]:
+    """Build the same item dict `_load_*` produces, for a single already-fetched row."""
+    if collection == "batch_plan":
+        item = {field: _row_text(row, field) for field in BATCH_FIELDS}
+        item["id"] = str(row["id"])
+        events = (events_by_batch or {}).get(int(row["id"]), [])
+        item["block_events"] = events
+        item["active_block_event"] = next((event for event in events if not event["ended_at"]), None)
+        item["block_total_seconds"] = sum(int(event["duration_seconds"] or 0) for event in events)
+        return item
+    if collection == "progress":
+        return {
+            **{field: _row_text(row, field) for field in PROGRESS_FIELDS},
+            "id": str(row["id"]),
+        }
+    item = {
+        **{field: _row_text(row, field) for field in NOTIFICATION_FIELDS},
+        "id": str(row["id"]),
+    }
+    item["doc_links"] = _parse_doc_links(item["doc_url"])
+    entry = (overrides or {}).get(int(row["id"]), {"skip": [], "force": []})
+    item["skip_dates"] = [{"date": value} for value in entry["skip"]]
+    item["force_dates"] = [{"date": value} for value in entry["force"]]
+    return item
 
 
 def add_block_event(path: Path, batch_plan_id: int, reason: str, started_at: str | None = None) -> int:
@@ -300,6 +465,10 @@ def _ensure_schema(
     webhook_seeds: list[dict[str, str]] | None = None,
     default_target: str = "prod",
 ) -> None:
+    key = _schema_key(path)
+    # P2: skip the whole DDL pass when this database is already current in this process.
+    if key in _SCHEMA_READY and not webhook_seeds:
+        return
     with _connect(path) as connection:
         connection.execute(
             """
@@ -497,6 +666,45 @@ def _ensure_schema(
         _ensure_webhook_schema(connection)
         _migrate_to_webhook_model(connection, webhook_seeds, default_target)
 
+        # P4: the hot lookups below were plain table scans. These three are cheap to
+        # maintain and `IF NOT EXISTS` keeps the pass idempotent on existing databases.
+        _ensure_index(
+            connection, "idx_batch_plan_natural_date", "batch_plan", ("natural_date",)
+        )
+        _ensure_index(
+            connection, "idx_batch_plan_archived", "batch_plan", ("archived", "execution_status")
+        )
+        _ensure_index(connection, "idx_block_events_batch", "block_events", ("batch_plan_id",))
+
+    _SCHEMA_READY.add(key)
+
+
+def _schema_key(path: Path) -> str:
+    """Identity for the schema cache: the resolved absolute path of the database.
+
+    `Path.resolve()` touches the filesystem, so callers within one schema pass reuse the
+    key they already computed rather than resolving the same path again.
+    """
+    return str(Path(path).resolve())
+
+
+def _ensure_index(
+    connection: sqlite3.Connection, name: str, table: str, columns: tuple[str, ...]
+) -> None:
+    """Create one secondary index, skipping it when the table lacks a column.
+
+    A legacy/hand-restored database can predate some of these columns, and only
+    `notification_tasks.date_rule` is healed by `_ensure_column`. Indexing is an
+    optimisation, so a missing column means "no index this time" instead of failing the
+    whole schema pass; reads keep working because they name their own columns.
+    """
+    available = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}
+    if not available.issuperset(columns):
+        return
+    connection.execute(
+        f"CREATE INDEX IF NOT EXISTS {name} ON {table}({', '.join(columns)})"
+    )
+
 
 def _is_empty(path: Path) -> bool:
     with _connect(path) as connection:
@@ -514,51 +722,63 @@ def _ensure_column(connection: sqlite3.Connection, table: str, column: str, defi
         connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
+def _read_batch_plan(connection: sqlite3.Connection) -> list[dict[str, Any]]:
+    rows = connection.execute(
+        f"SELECT {_select_list(connection, 'batch_plan')} FROM batch_plan ORDER BY id"
+    ).fetchall()
+    events_by_batch = _load_block_events(connection)
+    return [_item_from_row("batch_plan", row, events_by_batch) for row in rows]
+
+
 def _load_batch_plan(path: Path) -> list[dict[str, Any]]:
     with _connect(path) as connection:
-        rows = connection.execute("SELECT * FROM batch_plan ORDER BY id").fetchall()
-        events_by_batch = _load_block_events(connection)
-    items = []
-    for row in rows:
-        item = {field: _stringify(row[field]) for field in BATCH_FIELDS}
-        item["id"] = str(row["id"])
-        events = events_by_batch.get(row["id"], [])
-        item["block_events"] = events
-        item["active_block_event"] = next((event for event in events if not event["ended_at"]), None)
-        item["block_total_seconds"] = sum(int(event["duration_seconds"] or 0) for event in events)
-        items.append(item)
-    return items
+        return _read_batch_plan(connection)
+
+
+def _read_progress(connection: sqlite3.Connection) -> list[dict[str, Any]]:
+    rows = connection.execute(f"SELECT {_select_list(connection, 'progress')} FROM progress ORDER BY id").fetchall()
+    return [_item_from_row("progress", row) for row in rows]
 
 
 def _load_progress(path: Path) -> list[dict[str, Any]]:
     with _connect(path) as connection:
-        rows = connection.execute("SELECT * FROM progress ORDER BY id").fetchall()
-    return [{**{field: _stringify(row[field]) for field in PROGRESS_FIELDS}, "id": str(row["id"])} for row in rows]
+        return _read_progress(connection)
+
+
+def _read_notification_tasks(connection: sqlite3.Connection) -> list[dict[str, Any]]:
+    rows = connection.execute(
+        f"SELECT {_select_list(connection, 'notification_tasks')} FROM notification_tasks ORDER BY send_time, id"
+    ).fetchall()
+    overrides_by_task = _load_notification_date_overrides(connection)
+    return [_item_from_row("notification_tasks", row, overrides=overrides_by_task) for row in rows]
 
 
 def _load_notification_tasks(path: Path) -> list[dict[str, Any]]:
     with _connect(path) as connection:
-        rows = connection.execute("SELECT * FROM notification_tasks ORDER BY send_time, id").fetchall()
-        overrides_by_task = _load_notification_date_overrides(connection)
-    items = []
-    for row in rows:
-        item = {**{field: _stringify(row[field]) for field in NOTIFICATION_FIELDS}, "id": str(row["id"])}
-        item["doc_links"] = _parse_doc_links(item["doc_url"])
-        overrides = overrides_by_task.get(int(row["id"]), {"skip": [], "force": []})
-        item["skip_dates"] = [{"date": value} for value in overrides["skip"]]
-        item["force_dates"] = [{"date": value} for value in overrides["force"]]
-        items.append(item)
-    return items
+        return _read_notification_tasks(connection)
 
 
-def _load_notification_date_overrides(connection: sqlite3.Connection) -> dict[int, dict[str, list[str]]]:
-    rows = connection.execute(
-        """
-        SELECT notification_task_id, target_date, mode
-        FROM notification_date_overrides
-        ORDER BY target_date
-        """
-    ).fetchall()
+def _load_notification_date_overrides(
+    connection: sqlite3.Connection, notification_task_id: int | None = None
+) -> dict[int, dict[str, list[str]]]:
+    if notification_task_id is None:
+        rows = connection.execute(
+            """
+            SELECT notification_task_id, target_date, mode
+            FROM notification_date_overrides
+            ORDER BY target_date
+            """
+        ).fetchall()
+    else:
+        rows = connection.execute(
+            """
+            SELECT notification_task_id, target_date, mode
+            FROM notification_date_overrides
+            WHERE notification_task_id = ?
+            ORDER BY target_date
+            """,
+            (notification_task_id,),
+        ).fetchall()
     overrides: dict[int, dict[str, list[str]]] = {}
     for row in rows:
         task_overrides = overrides.setdefault(int(row["notification_task_id"]), {"skip": [], "force": []})
@@ -567,9 +787,8 @@ def _load_notification_date_overrides(connection: sqlite3.Connection) -> dict[in
     return overrides
 
 
-def _load_scheduler_times(path: Path) -> list[dict[str, str]]:
-    with _connect(path) as connection:
-        rows = connection.execute("SELECT * FROM scheduler_times ORDER BY send_time, reminder_id").fetchall()
+def _read_scheduler_times(connection: sqlite3.Connection) -> list[dict[str, str]]:
+    rows = connection.execute("SELECT * FROM scheduler_times ORDER BY send_time, reminder_id").fetchall()
     return [
         {
             "id": _stringify(row["reminder_id"]),
@@ -580,9 +799,13 @@ def _load_scheduler_times(path: Path) -> list[dict[str, str]]:
     ]
 
 
-def _load_scheduler_skip_dates(path: Path) -> list[dict[str, str]]:
+def _load_scheduler_times(path: Path) -> list[dict[str, str]]:
     with _connect(path) as connection:
-        rows = connection.execute("SELECT * FROM scheduler_skip_dates ORDER BY skip_date").fetchall()
+        return _read_scheduler_times(connection)
+
+
+def _read_scheduler_skip_dates(connection: sqlite3.Connection) -> list[dict[str, str]]:
+    rows = connection.execute("SELECT * FROM scheduler_skip_dates ORDER BY skip_date").fetchall()
     return [
         {
             "date": _stringify(row["skip_date"]),
@@ -592,9 +815,13 @@ def _load_scheduler_skip_dates(path: Path) -> list[dict[str, str]]:
     ]
 
 
-def _load_scheduler_force_dates(path: Path) -> list[dict[str, str]]:
+def _load_scheduler_skip_dates(path: Path) -> list[dict[str, str]]:
     with _connect(path) as connection:
-        rows = connection.execute("SELECT * FROM scheduler_force_dates ORDER BY force_date").fetchall()
+        return _read_scheduler_skip_dates(connection)
+
+
+def _read_scheduler_force_dates(connection: sqlite3.Connection) -> list[dict[str, str]]:
+    rows = connection.execute("SELECT * FROM scheduler_force_dates ORDER BY force_date").fetchall()
     return [
         {
             "date": _stringify(row["force_date"]),
@@ -604,12 +831,15 @@ def _load_scheduler_force_dates(path: Path) -> list[dict[str, str]]:
     ]
 
 
-def get_template_vars(path: Path) -> list[dict[str, str]]:
-    _ensure_schema(path)
+def _load_scheduler_force_dates(path: Path) -> list[dict[str, str]]:
     with _connect(path) as connection:
-        rows = connection.execute(
-            "SELECT * FROM reminder_template_vars ORDER BY sort_order DESC, id DESC"
-        ).fetchall()
+        return _read_scheduler_force_dates(connection)
+
+
+def _read_template_vars(connection: sqlite3.Connection) -> list[dict[str, str]]:
+    rows = connection.execute(
+        "SELECT * FROM reminder_template_vars ORDER BY sort_order DESC, id DESC"
+    ).fetchall()
     return [
         {
             "id": str(row["id"]),
@@ -620,6 +850,12 @@ def get_template_vars(path: Path) -> list[dict[str, str]]:
         }
         for row in rows
     ]
+
+
+def get_template_vars(path: Path) -> list[dict[str, str]]:
+    _ensure_schema(path)
+    with _connect(path) as connection:
+        return _read_template_vars(connection)
 
 
 def add_template_var(path: Path, var_name: str, var_label: str, var_value: str) -> int:
@@ -875,6 +1111,9 @@ def _rebuild_legacy_template_table(
 
 
 def _table_columns(connection: sqlite3.Connection, table: str) -> set[str]:
+    # Not cached: CPython reuses object ids once a connection is closed, and these are
+    # short-lived per-call connections, so an id-keyed memo would hand stale schemas to
+    # later connections. One `PRAGMA` costs microseconds.
     return {row["name"] for row in connection.execute(f"PRAGMA table_info({table})").fetchall()}
 
 
@@ -1429,12 +1668,38 @@ def toggle_webhook(path: Path, webhook_id: int) -> bool:
         return bool(enabled)
 
 
+def _seed_is_allowed(
+    url: str,
+    allowed_hosts: tuple[str, ...] | list[str] | set[str] | None,
+    allow_local: bool,
+) -> tuple[bool, str]:
+    """SEC-03 check for a `.env` seed, resolved lazily to keep `store` import-light.
+
+    The import is deferred so this module stays free of a hard dependency on the policy
+    helper (and its stdlib-only surface) at import time; callers outside an app context —
+    the CLI and the scheduler — get the same verdict as the web form.
+    """
+    from qwbot.security import validate_webhook_url
+
+    return validate_webhook_url(url, extra_hosts=allowed_hosts or (), allow_local=allow_local)
+
+
 def import_env_webhooks(
     path: Path,
     webhook_seeds: list[dict[str, str]] | None,
     default_target: str = "prod",
+    *,
+    allowed_hosts: tuple[str, ...] | list[str] | set[str] | None = None,
+    allow_local: bool = False,
 ) -> int:
-    """Add `.env` webhooks that are not in the database yet. Returns rows added."""
+    """Add `.env` webhooks that are not in the database yet. Returns rows added.
+
+    H-1: a seed URL is stored verbatim and later sent to by the scheduler without ever
+    passing the web form, so it is checked against the same SEC-03 policy here. Refusing at
+    the door keeps an intranet target out of the table instead of relying on every reader;
+    skipped seeds are logged rather than raised, because one bad `.env` line must not stop
+    the whole service from starting.
+    """
     _ensure_schema(path)
     seeds = [seed for seed in (webhook_seeds or []) if str(seed.get("url") or "").strip()]
     if not seeds:
@@ -1452,6 +1717,14 @@ def import_env_webhooks(
         for seed in seeds:
             url = str(seed.get("url") or "").strip()
             if not url or url in existing_urls:
+                continue
+            valid, reason = _seed_is_allowed(url, allowed_hosts, allow_local)
+            if not valid:
+                _logger.warning(
+                    "skipped .env webhook seed %r: %s (host refused by SEC-03 policy)",
+                    str(seed.get("name") or "").strip() or DEFAULT_WEBHOOK_NAME,
+                    reason,
+                )
                 continue
             existing_urls.add(url)
             max_order = int(max_order) + 1
@@ -1885,14 +2158,29 @@ def load_dispatch_plan(path: Path) -> list[dict[str, Any]]:
     return plan
 
 
-def _load_block_events(connection: sqlite3.Connection) -> dict[int, list[dict[str, Any]]]:
-    rows = connection.execute(
-        """
-        SELECT *
-        FROM block_events
-        ORDER BY started_at, id
-        """
-    ).fetchall()
+def _load_block_events(
+    connection: sqlite3.Connection, batch_plan_id: int | None = None
+) -> dict[int, list[dict[str, Any]]]:
+    if batch_plan_id is None:
+        rows = connection.execute(
+            """
+            SELECT *
+            FROM block_events
+            ORDER BY started_at, id
+            """
+        ).fetchall()
+    else:
+        # P3/P4: single-item reads only need that batch's events, and the new
+        # idx_block_events_batch index turns this into an index lookup.
+        rows = connection.execute(
+            """
+            SELECT *
+            FROM block_events
+            WHERE batch_plan_id = ?
+            ORDER BY started_at, id
+            """,
+            (batch_plan_id,),
+        ).fetchall()
     events_by_batch: dict[int, list[dict[str, Any]]] = {}
     for row in rows:
         event = {
@@ -1919,6 +2207,87 @@ def _insert_batch(connection: sqlite3.Connection, item: dict[str, str]) -> int:
         [values[field] for field in fields],
     )
     return int(cursor.lastrowid)
+
+
+@contextmanager
+def _transaction(path: Path) -> Iterator[sqlite3.Connection]:
+    """P1: one connection and one commit for a whole batch of writes.
+
+    The public helpers (`add_item` / `update_item`) each open their own connection and
+    each end with a COMMIT, so an import of N rows paid N fsyncs plus N schema passes.
+    Callers that already hold a connection can use `_insert_batch` / `_update_batch`
+    directly inside this block; the single commit happens when it exits successfully,
+    and any exception rolls the whole batch back.
+    """
+    _ensure_schema(path)
+    with _connect(path) as connection:
+        yield connection
+
+
+def insert_items(path: Path, collection: str, items: list[dict[str, Any]]) -> list[int]:
+    """Insert many items in ONE transaction and return their new ids (P1)."""
+    ids, _ = write_items(path, collection, inserts=items)
+    return ids
+
+
+def write_items(
+    path: Path,
+    collection: str,
+    *,
+    inserts: list[dict[str, Any]] | None = None,
+    updates: list[tuple[int, dict[str, Any]]] | None = None,
+) -> tuple[list[int], int]:
+    """Apply a batch of inserts and id-updates in ONE transaction (P1).
+
+    Returns the inserted ids and how many rows were updated. This is the write path for
+    every bulk change (`import-plan`, the legacy status bootstrap, the web auto-archive
+    sweep), so no caller pays a connect + schema pass + COMMIT per row. Items are cleaned
+    exactly as `add_item` / `update_item` clean them.
+    """
+    _ensure_collection(collection)
+    inserts, updates = list(inserts or []), list(updates or [])
+    if not inserts and not updates:
+        _ensure_schema(path)
+        return [], 0
+    insert = _collection_writer(collection)
+    update_row = _collection_updater(collection)
+    clean = _collection_cleaner(collection)
+    with _transaction(path) as connection:
+        ids = [insert(connection, clean(item)) for item in inserts]
+        for index, item in updates:
+            update_row(connection, index, clean(item))
+    return ids, len(updates)
+
+
+def _collection_cleaner(collection: str) -> Callable[[Any], dict[str, str]]:
+    """The cleaning rule `add_item` / `update_item` apply to this collection (B-1).
+
+    `notification_tasks` is deliberately NOT cleaned by `_clean_item`: that helper maps
+    batch-plan vocabulary (`natural_date`, `date`, `content`, ...) and knows nothing about
+    `title` / `doc_url` / `at_all` / `date_rule`, so routing a notification task through it
+    silently stored empty document links and dropped the schedule rule. The bulk write path
+    must resolve the same per-collection cleaner the single-row path uses, otherwise the two
+    entry points drift apart and one of them corrupts data.
+    """
+    if collection == "notification_tasks":
+        return _clean_notification_task
+    return _clean_item
+
+
+def _collection_writer(collection: str) -> Callable[[sqlite3.Connection, dict[str, Any]], int]:
+    if collection == "batch_plan":
+        return _insert_batch
+    if collection == "progress":
+        return _insert_progress
+    return _insert_notification_task
+
+
+def _collection_updater(collection: str) -> Callable[..., None]:
+    if collection == "batch_plan":
+        return _update_batch
+    if collection == "progress":
+        return _update_progress
+    return _update_notification_task
 
 
 def _update_batch(connection: sqlite3.Connection, index: int, item: dict[str, str]) -> None:

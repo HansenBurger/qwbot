@@ -102,6 +102,24 @@ python -m qwbot.cli web
 
 打开 `http://127.0.0.1:5000`，即可维护跑批计划。页面默认按自然日历、跑批前交易日期、跑批后交易日期升序展示未归档计划；新建和修改通过弹窗完成；只有“已完成”计划允许归档，“待执行”允许修改和删除，“进行中/有阻塞”只允许修改。状态改为“已完成”后当天仍保留在未归档列表，第二天打开页面时会自动归档。已归档记录为只读，支持分页、按自然日/交易日/节假日筛选和详情查看；进入已归档页时默认展示当天自然日的归档记录，如果当天无数据则展示最近一个有归档数据的自然日。状态为“有阻塞”时需要填写阻塞原因，并会自动展示在跑批计划下方的阻塞看板；每次阻塞会记录开始、关闭和持续时间，可在看板或归档详情中查看。未归档计划支持维护“计划执行时间”；点击“开始”“完成”只推进状态、记录执行时长和归档，默认不再逐个批推送消息，需要即时通知时在 `/notifications` 页面打开“批量即时通知”（开启后“开始”会 `@所有人`，“完成”会带上已完成批量和下一批量）。运行态数据会写入 SQLite 数据库 `data/qwbot.sqlite3`，首次启动会从 `data/sample_status.json` 自动迁移；机器人预览、立即发送和定时发送都会读取未归档的跑批计划。
 
+## 面板登录与安全配置（P0）
+
+维护面板从 P0 起受最小认证保护，配置都在 `.env`：
+
+```bash
+QWBOT_WEB_USERNAME=admin          # 默认 admin
+QWBOT_WEB_PASSWORD=...            # 必填；未设置时面板与所有写操作一律拒绝（fail-closed）
+QWBOT_SECRET_KEY=...              # 会话签名密钥；留空则每次启动随机生成（重启后需重新登录）
+QWBOT_SECURE_COOKIES=             # HTTPS/反代终结 TLS 时设为 1，Cookie 才带 Secure 属性
+```
+
+- `/notifications` 及所有写操作路由（新增/修改/删除机器人、模板、时间、跑批计划、跳过日期、文档变量，以及“测试连通性”“测试发送”）都需要登录后才能访问；未登录 POST 直接返回 401。
+- 所有表单都带 CSRF 令牌，跨站伪造的提交会被拒绝（提示“页面已过期，请重新登录后再提交”）。程序化调用需要先 `GET /login` 取令牌，再带上 `csrf_token` 字段或 `X-CSRF-Token` 头。
+- 跑批计划首页 `/` 仍可匿名只读查看，但“新建/修改/删除/归档/开始/完成/关闭阻塞”等控件只对已登录的操作者渲染；自动归档扫描也只在登录用户的访问中执行。
+- webhook 主机白名单：默认只允许企业微信官方域名 `qyapi.weixin.qq.com`，可用 `QWBOT_ALLOWED_WEBHOOK_HOSTS=a.example,b.example` 扩展。RFC1918（`10.*`、`172.16-31.*`、`192.168.*`）、链路本地（含云元数据地址 `169.254.169.254`）、`.local/.internal` 一类内网目标**任何情况下都被拒绝**。
+- `QWBOT_ALLOW_INSECURE_LOCAL_WEBHOOKS=1` 仅用于本地自测：它只额外放行回环地址（`127.0.0.1`/`localhost`），配合 `scripts/mock-webhook.py` 使用；生产环境必须保持为空。
+- 错误消息脱敏：连通性测试/测试发送失败时，页面只显示分类提示（连接超时、DNS 解析失败、HTTP 状态码、企业微信 errcode 等），完整异常经脱敏后写入服务端日志；`Location` 头、页面 HTML 和日志都不会出现原始 key。
+
 打开 `http://127.0.0.1:5000/notifications`，即可维护群机器人和消息通知：
 
 - **群机器人**：新增、编辑、启用/停用、设为默认、测试连通性、删除。页面上 webhook 地址一律脱敏展示（`key=MOCK****0001`），编辑弹窗也不回填完整 key，留空表示保持不变，勾选“清空地址”才会退回 `.env` 兜底。
@@ -233,6 +251,8 @@ sh scripts/selftest.sh          # pytest + 端到端
 sh scripts/selftest.sh --unit   # 只跑 pytest
 sh scripts/selftest.sh --live   # 只跑端到端
 ```
+
+`scripts/selftest.sh --live` 会先登录面板并自动带上 CSRF 令牌，因此 P0 的认证与 CSRF 也在端到端覆盖范围内。
 
 `scripts/selftest.sh` 会在 `tmp/selftest/` 下准备一次性 `.env` 和 SQLite 数据库，启动 `scripts/mock-webhook.py`（模拟企业微信机器人接口，`key` 以 `FAIL` 开头返回 `errcode 93000`，以 `HTTP500` 开头返回 500）和一个临时 web 服务，然后由 `scripts/selftest.py` 校验：环境变量播种、页面脱敏、机器人/模板/时间 CRUD、按机器人隔离投递、坏 webhook 不影响其他机器人、启停生效、调度命中、CLI `preview`/`send-now`/`test-webhook`、级联删除和“最后一个机器人不可删除”。
 

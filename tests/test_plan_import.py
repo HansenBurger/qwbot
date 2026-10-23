@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import sqlite3
+import time as time_module
 import zipfile
 from datetime import date, time
 from pathlib import Path
 
 import pytest
 
-from qwbot import store
+from qwbot import store, xlsx
 from qwbot.plan_import import import_plan_file, import_plan_rows, load_plan_rows
 from qwbot.xlsx import XlsxError, list_sheets, read_sheet
 
@@ -196,6 +198,254 @@ def test_unknown_past_mode_is_rejected(workbook: Path, db_path: Path) -> None:
     store.init_store(db_path)
     with pytest.raises(ValueError):
         import_plan_file(db_path, workbook, past="delete", today=TODAY)
+
+
+# ---------------------------------------------------------------------------
+# P1 / P3 / P4 / SEC-02: the performance work must not change observable behaviour
+# ---------------------------------------------------------------------------
+
+
+def test_import_writes_every_row_in_one_transaction(workbook: Path, db_path: Path) -> None:
+    """P1: one connect + one commit for the whole sheet, not one per row."""
+    store.init_store(db_path)
+    rows, _ = load_plan_rows(workbook, "长周期")
+
+    real_connect = sqlite3.connect
+    calls: list[str] = []
+
+    def counting_connect(*args: object, **kwargs: object) -> sqlite3.Connection:
+        calls.append("connect")
+        return real_connect(*args, **kwargs)  # type: ignore[arg-return]
+
+    sqlite3.connect = counting_connect  # type: ignore[assignment]
+    try:
+        summary = import_plan_rows(db_path, rows, today=TODAY)
+    finally:
+        sqlite3.connect = real_connect  # type: ignore[assignment]
+
+    assert len(summary.created) == 4
+    # The read-only `load_status_file` pass costs one connection; the write phase adds
+    # exactly one more. Before the fix this was 2N+1 (9 connections for these 4 rows).
+    assert len(calls) == 2, calls
+
+
+def test_failed_import_rolls_the_whole_batch_back(db_path: Path) -> None:
+    """P1 side effect worth locking down: a mid-write error leaves nothing behind."""
+    store.init_store(db_path)
+    rows = [
+        {
+            "category": "长周期",
+            "natural_date": f"2026-09-{day:02d}",
+            "date": f"2026-09-{day:02d}",
+            "batch_start_time": "15:00",
+            "current_accounting_date": "",
+            "next_accounting_date": "",
+            "holiday_flag": "N",
+            "description": "存量特殊日期",
+            "content": "存量特殊日期",
+        }
+        for day in (10, 11)
+    ]
+
+    # The import writes through `store.write_items`, which resolves its row writer by
+    # collection; wrap that writer so the second statement trips the `block_events` FK.
+    real_writer = store._collection_writer
+
+    def writer_that_fails(collection: str):
+        insert_row = real_writer(collection)
+
+        def wrapped(connection: sqlite3.Connection, item: dict[str, str]) -> int:
+            row_id = insert_row(connection, item)
+            if str(item.get("natural_date", "")).endswith("-11"):
+                connection.execute(
+                    "INSERT INTO block_events (batch_plan_id, reason) VALUES (?, ?)",
+                    (999_999, "boom"),
+                )
+            return row_id
+
+        return wrapped
+
+    store._collection_writer = writer_that_fails  # type: ignore[assignment]
+    try:
+        with pytest.raises(sqlite3.IntegrityError):
+            import_plan_rows(db_path, rows, today=TODAY)
+    finally:
+        store._collection_writer = real_writer  # type: ignore[assignment]
+
+    # One transaction means one all-or-nothing outcome — the first row is gone too.
+    assert store.load_status_file(db_path)["batch_plan"] == []
+
+
+def test_get_item_matches_the_full_load(db_path: Path) -> None:
+    """P3: the single-row read returns exactly what the table-wide loader produced."""
+    store.init_store(db_path)
+    first = store.add_item(db_path, "batch_plan", {"content": "第一批", "natural_date": "2026-09-10"})
+    second = store.add_item(db_path, "batch_plan", {"content": "第二批", "natural_date": "2026-09-11"})
+    store.add_block_event(db_path, first, "等待上游数据", "2026-09-10T15:00:00")
+    store.add_block_event(db_path, second, "已解决阻塞", "2026-09-11T10:00:00")
+    store.close_open_block(db_path, second, "2026-09-11T11:00:00")
+
+    loaded = {int(item["id"]): item for item in store.load_status_file(db_path)["batch_plan"]}
+    for index in (first, second):
+        assert store.get_item(db_path, "batch_plan", index) == loaded[index]
+
+    progress = store.add_item(db_path, "progress", {"content": "用例评审", "owner": "张三"})
+    assert store.get_item(db_path, "progress", progress) == {
+        "id": str(progress),
+        "content": "用例评审",
+        "owner": "张三",
+        "status": "",
+        "category": "",
+        "date": "",
+    }
+
+    task = store.add_item(
+        db_path, "notification_tasks", {"title": "日报", "content": "正文", "doc_url": "https://a/x"}
+    )
+    store.add_scheduler_skip_date(db_path, "2026-09-12")
+    fetched = store.get_item(db_path, "notification_tasks", task)
+    assert fetched["doc_links"] and fetched["skip_dates"] == []
+    with pytest.raises(IndexError):
+        store.get_item(db_path, "batch_plan", 999999)
+
+
+def test_schema_pass_runs_once_per_process(db_path: Path, tmp_path: Path) -> None:
+    """P2: `_ensure_schema` is memoised per database path within the process."""
+    store.reset_schema_cache()
+    real_connect = sqlite3.connect
+    counted: list[int] = []
+
+    def counting_connect(*args: object, **kwargs: object) -> sqlite3.Connection:
+        connection = real_connect(*args, **kwargs)  # type: ignore[arg-return]
+        counted.append(id(connection))
+        return connection
+
+    sqlite3.connect = counting_connect  # type: ignore[assignment]
+    try:
+        store._ensure_schema(db_path)
+        after_first = len(counted)
+        for _ in range(5):
+            store._ensure_schema(db_path)
+        assert len(counted) == after_first, "schema pass repeated for the same database"
+
+        other = tmp_path / "second.sqlite3"
+        store._ensure_schema(other)
+        assert len(counted) > after_first, "a different database must still get its pass"
+    finally:
+        sqlite3.connect = real_connect  # type: ignore[assignment]
+        store.reset_schema_cache()
+
+
+def test_hot_query_indexes_exist(db_path: Path) -> None:
+    """P4: the three indexes back the natural-date filter, the archive view and block events."""
+    store.init_store(db_path)
+    with sqlite3.connect(db_path) as connection:
+        names = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index'"
+            ).fetchall()
+        }
+    assert {
+        "idx_batch_plan_natural_date",
+        "idx_batch_plan_archived",
+        "idx_block_events_batch",
+    } <= names
+
+    # And the planner actually uses the block-events index instead of scanning.
+    with sqlite3.connect(db_path) as connection:
+        plan = connection.execute(
+            "EXPLAIN QUERY PLAN SELECT * FROM block_events WHERE batch_plan_id = ?", (1,)
+        ).fetchall()
+    assert any("idx_block_events_batch" in row[3] for row in plan), plan
+
+
+def test_zip_bomb_is_refused_before_it_is_expanded(tmp_path: Path) -> None:
+    """SEC-02: a payload past the budget fails from the directory alone — no expansion."""
+    path = tmp_path / "bomb.xlsx"
+    row = b'<row r="1"><c r="A1"><v>1</v></c></row>'
+    sheet = (
+        b'<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        + row * 7_500_000  # ~280 MiB uncompressed, but it compresses to almost nothing
+        + b"</worksheet>"
+    )
+    _write_minimal_workbook(path, sheet)
+    assert path.stat().st_size < 2 * 1024 * 1024  # tiny file, enormous expansion
+
+    started = time_module.perf_counter()
+    with pytest.raises(XlsxError) as error:
+        read_sheet(path, "S")
+    # Rejected from the central directory, so it never streams or parses the payload.
+    assert time_module.perf_counter() - started < 1.0
+    assert "过大" in str(error.value) and "上限" in str(error.value)
+
+
+def test_absurd_row_count_stops_mid_stream(tmp_path: Path) -> None:
+    """SEC-02: more rows than allowed are refused while streaming, not after parsing."""
+    path = tmp_path / "tall.xlsx"
+    rows = [b'<row r="%d"><c r="A%d"><v>1</v></c></row>' % (i, i) for i in range(1, 250_001)]
+    sheet = (
+        b'<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>'
+        + b"".join(rows)
+        + b"</sheetData></worksheet>"
+    )
+    _write_minimal_workbook(path, sheet)
+    assert len(sheet) < xlsx.MAX_MEMBER_BYTES  # under the size budget: geometry does it
+
+    with pytest.raises(XlsxError) as error:
+        read_sheet(path, "S")
+    assert "过高" in str(error.value)
+
+
+def test_absurd_sheet_geometry_is_refused(tmp_path: Path) -> None:
+    """SEC-02: row/column caps stop a sparse sheet from blowing up the grid build."""
+    wide = tmp_path / "wide.xlsx"
+    _write_minimal_workbook(
+        wide,
+        b'<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        b"<sheetData><row r=\"1\"><c r=\"XFE1\"><v>1</v></c></row></sheetData></worksheet>",
+    )
+    with pytest.raises(XlsxError) as error:
+        read_sheet(wide, "S")
+    assert "过宽" in str(error.value)
+
+    sparse = tmp_path / "sparse.xlsx"
+    _write_minimal_workbook(
+        sparse,
+        b'<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        b'<sheetData><row r="200001"><c r="A200001"><v>1</v></c></row></sheetData></worksheet>',
+    )
+    with pytest.raises(XlsxError) as error:
+        read_sheet(sparse, "S")
+    assert "第 200001 行超过行数上限" in str(error.value)
+
+
+def test_normal_workbook_still_reads_after_the_limits(workbook: Path) -> None:
+    """The budgets must not touch legitimate exports — same grid as before the guard."""
+    grid = read_sheet(workbook, "长周期")
+    assert grid[1][2] == "2026-09-10"
+    assert list_sheets(workbook) == ["UAT2", "长周期"]
+
+
+def _write_minimal_workbook(path: Path, sheet_xml: bytes) -> None:
+    """Smallest workbook the reader accepts, with one caller-supplied sheet part."""
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "xl/workbook.xml",
+            b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            b'<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"'
+            b' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+            b'<sheets><sheet name="S" sheetId="1" r:id="rId2"/></sheets></workbook>',
+        )
+        archive.writestr(
+            "xl/_rels/workbook.xml.rels",
+            b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            b'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            b'<Relationship Id="rId2"'
+            b' Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet"'
+            b' Target="worksheets/sheet1.xml"/></Relationships>',
+        )
+        archive.writestr("xl/worksheets/sheet1.xml", sheet_xml)
 
 
 # ---------------------------------------------------------------------------

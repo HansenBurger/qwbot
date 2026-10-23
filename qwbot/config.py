@@ -27,6 +27,16 @@ class Settings:
     frontend_url: str | None
     local_status_file: Path
     db_path: Path
+    # SEC-01: credentials guarding every mutating route and the notification panel.
+    web_username: str = "admin"
+    web_password: str | None = None
+    secret_key: str | None = None
+    # SEC-03: hosts a webhook URL may point at, beyond the built-in official one.
+    allowed_webhook_hosts: tuple[str, ...] = ()
+    allow_insecure_local_webhooks: bool = False
+    # SEC-01: mark the session cookie Secure when the panel is reached over TLS (or an
+    # operator says so explicitly). Plain-HTTP local development must stay usable.
+    secure_cookies: bool = False
 
     def with_webhook_target(self, target: str) -> "Settings":
         return replace(
@@ -125,7 +135,29 @@ def load_settings(env_file: str | Path = ".env") -> Settings:
         frontend_url=_optional("FRONTEND_URL"),
         local_status_file=Path(os.getenv("LOCAL_STATUS_FILE", "data/sample_status.json")),
         db_path=Path(os.getenv("QWBOT_DB_PATH", "data/qwbot.sqlite3")),
+        web_username=os.getenv("QWBOT_WEB_USERNAME", "admin").strip() or "admin",
+        web_password=_optional("QWBOT_WEB_PASSWORD"),
+        secret_key=_optional("QWBOT_SECRET_KEY"),
+        allowed_webhook_hosts=_csv_env("QWBOT_ALLOWED_WEBHOOK_HOSTS"),
+        allow_insecure_local_webhooks=_bool_env("QWBOT_ALLOW_INSECURE_LOCAL_WEBHOOKS"),
+        secure_cookies=_bool_env("QWBOT_SECURE_COOKIES"),
     )
+
+
+def _csv_env(name: str) -> tuple[str, ...]:
+    """Parse a comma separated host list into lowercase names without duplicates."""
+    raw = os.getenv(name) or ""
+    hosts: list[str] = []
+    for item in raw.split(","):
+        host = item.strip().lower().rstrip(".")
+        if host and host not in hosts:
+            hosts.append(host)
+    return tuple(hosts)
+
+
+def _bool_env(name: str) -> bool:
+    value = (os.getenv(name) or "").strip().lower()
+    return value in {"1", "true", "yes", "on"}
 
 
 def _optional(name: str) -> str | None:

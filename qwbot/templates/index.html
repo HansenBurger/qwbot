@@ -17,6 +17,14 @@
           <nav class="page-nav" aria-label="页面导航">
             <a class="ghost-button active" href="{{ url_for('index') }}">跑批计划</a>
             <a class="ghost-button" href="{{ url_for('notification_page') }}">消息通知</a>
+            {% if is_authenticated() %}
+              <form class="inline-auth-form" method="post" action="{{ url_for('logout') }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <button type="submit" class="ghost-button">退出登录</button>
+              </form>
+            {% else %}
+              <a class="ghost-button" href="{{ url_for('login') }}">登录</a>
+            {% endif %}
           </nav>
         </div>
         <div class="clock-card" aria-live="polite">

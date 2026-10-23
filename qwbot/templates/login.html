@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>登录 · QWBot</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  </head>
+  <body>
+    <main class="page">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">QWBot</p>
+          <h1>维护面板登录</h1>
+          <p>群机器人配置、消息模板与跑批计划属于运维操作，需要登录后才能查看和修改。</p>
+        </div>
+      </header>
+
+      {% if error %}
+        <div class="error-message">{{ error }}</div>
+      {% endif %}
+
+      <section class="board">
+        <form class="modal-card" method="post" action="{{ url_for('submit_login') }}">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <input type="hidden" name="next" value="{{ next }}">
+          <div class="modal-grid">
+            <label>
+              <span>用户名</span>
+              <input name="username" autocomplete="username" required autofocus>
+            </label>
+            <label>
+              <span>登录口令</span>
+              <input name="password" type="password" autocomplete="current-password" required>
+            </label>
+          </div>
+          <p class="batch-notify-hint muted-text">
+            口令来自服务端 <code>.env</code> 的 <code>QWBOT_WEB_PASSWORD</code>（用户名默认
+            <code>admin</code>，可用 <code>QWBOT_WEB_USERNAME</code> 修改）。
+          </p>
+          <div class="modal-actions">
+            <button type="submit">登录</button>
+            <a class="ghost-button" href="{{ url_for('index') }}">返回跑批计划</a>
+          </div>
+        </form>
+      </section>
+    </main>
+  </body>
+</html>

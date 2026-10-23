@@ -18,7 +18,11 @@
         已归档 {{ archived_count }}
       </a>
       {% if view != "archived" %}
-        <button type="button" data-open-modal="create-plan">新建计划</button>
+        {% if can_operate %}
+          <button type="button" data-open-modal="create-plan">新建计划</button>
+        {% else %}
+          <span class="muted-text">登录后可维护跑批计划</span>
+        {% endif %}
       {% endif %}
     </div>
   </div>
@@ -100,12 +104,12 @@
                 {% if view == "archived" %}
                   <button type="button" class="link-button" data-open-modal="detail-plan-{{ entry.index }}">详情</button>
                 {% else %}
-                  {% if entry.can_start %}
+                  {% if can_operate and entry.can_start %}
                     <form method="post" action="{{ url_for('start_item', index=entry.index) }}">
                       <button type="submit" class="link-button" data-confirm="{{ '确认通知批量开始执行？' if batch_notify_enabled else '确认开始该批量？（批量即时通知已关闭，不会推送消息）' }}">开始</button>
                     </form>
                   {% endif %}
-                  {% if entry.can_complete %}
+                  {% if can_operate and entry.can_complete %}
                     <form method="post" action="{{ url_for('complete_item', index=entry.index) }}">
                       <button type="submit" class="link-button" data-confirm="{{ '确认通知批量执行完成？' if batch_notify_enabled else '确认该批量已完成？（批量即时通知已关闭，不会推送消息）' }}">完成</button>
                     </form>
@@ -113,15 +117,15 @@
                   {% if entry.is_sequence_blocked %}
                     <span class="blocked-inline">需先处理阻塞</span>
                   {% endif %}
-                  {% if entry.can_edit %}
+                  {% if can_operate and entry.can_edit %}
                     <button type="button" class="link-button" data-open-modal="edit-plan-{{ entry.index }}">修改</button>
                   {% endif %}
-                  {% if entry.can_delete %}
+                  {% if can_operate and entry.can_delete %}
                     <form method="post" action="{{ url_for('remove_item', collection='batch_plan', index=entry.index) }}">
                       <button type="submit" class="link-button danger-text" data-confirm="确认删除这条跑批计划？">删除</button>
                     </form>
                   {% endif %}
-                  {% if entry.can_archive %}
+                  {% if can_operate and entry.can_archive %}
                     <form method="post" action="{{ url_for('archive_item', index=entry.index) }}">
                       <button type="submit" class="link-button" data-confirm="确认归档这条跑批计划？">归档</button>
                     </form>
@@ -185,7 +189,7 @@
               <td>{{ entry.duration }}</td>
               <td><span class="block-state">{{ entry.status_label }}</span></td>
               <td>
-                {% if entry.is_open %}
+                {% if can_operate and entry.is_open %}
                   <form method="post" action="{{ url_for('close_block', index=entry.batch_index) }}">
                     <button type="submit" class="link-button" data-confirm="确认关闭该阻塞并恢复为进行中？">关闭</button>
                   </form>
@@ -203,6 +207,7 @@
   {% endif %}
 </section>
 
+{% if can_operate %}
 {% set modal_id = "create-plan" %}
 {% set modal_title = "新建跑批计划" %}
 {% set form_action = url_for('create_item', collection='batch_plan') %}
@@ -218,15 +223,18 @@
   "batch_start_time": ""
 } %}
 {% include "_plan_modal.html" %}
+{% endif %}
 
 {% if view != "archived" %}
-  {% for entry in batch_plan %}
-    {% set modal_id = "edit-plan-" ~ entry.index %}
-    {% set modal_title = "修改跑批计划" %}
-    {% set form_action = url_for('edit_item', collection='batch_plan', index=entry.index) %}
-    {% set item = entry.item %}
-    {% include "_plan_modal.html" %}
-  {% endfor %}
+  {% if can_operate %}
+    {% for entry in batch_plan %}
+      {% set modal_id = "edit-plan-" ~ entry.index %}
+      {% set modal_title = "修改跑批计划" %}
+      {% set form_action = url_for('edit_item', collection='batch_plan', index=entry.index) %}
+      {% set item = entry.item %}
+      {% include "_plan_modal.html" %}
+    {% endfor %}
+  {% endif %}
 {% else %}
   {% for entry in batch_plan %}
     {% set item = entry.item %}

@@ -13,6 +13,7 @@ from qwbot.config import Settings, load_settings
 from qwbot.message import render_message_template
 from qwbot.plan_import import DEFAULT_SHEET, PAST_MODES, import_plan_file
 from qwbot.planner import daily_batch_context, is_business_day, is_holiday
+from qwbot.security import redact
 from qwbot.store import (
     get_default_webhook,
     get_webhook,
@@ -28,6 +29,21 @@ from qwbot.wecom import WeComWebhookClient
 from qwbot.xlsx import XlsxError
 
 CONNECTIVITY_TEST_TEXT = "企业微信机器人连通性测试成功。"
+
+
+def _webhook_client(settings: Settings, url: str) -> WeComWebhookClient:
+    """A client that re-checks SEC-03 with this deployment's whitelist before it sends.
+
+    The stored row is the trust boundary here: `.env` seeds, restored backups and rows
+    written by an older build never passed the web form, so the send call itself has to
+    carry the policy (H-1). `WeComWebhookClient._send` refuses a non-whitelisted target
+    with a masked, key-free message.
+    """
+    return WeComWebhookClient(
+        url,
+        allowed_hosts=settings.allowed_webhook_hosts,
+        allow_local=settings.allow_insecure_local_webhooks,
+    )
 
 
 def main() -> None:
@@ -112,7 +128,7 @@ def main() -> None:
         url = resolve_webhook_url(webhook, settings)
         if not url:
             raise SystemExit("选中的群机器人没有配置 webhook 地址，请在维护页面填写。")
-        WeComWebhookClient(url).send_text(CONNECTIVITY_TEST_TEXT)
+        _webhook_client(settings, url).send_text(CONNECTIVITY_TEST_TEXT)
         name = webhook.get("name") if webhook else "默认群机器人"
         print(f"Webhook test message sent to {name}.")
         return
@@ -318,7 +334,7 @@ def _send_now(settings: Settings, webhook: dict[str, Any] | None, template_id: i
     url = resolve_webhook_url(target, settings)
     if not url:
         raise SystemExit("选中的群机器人没有配置 webhook 地址，请在维护页面填写。")
-    client = WeComWebhookClient(url)
+    client = _webhook_client(settings, url)
     name = target.get("name") if target else "默认群机器人"
     for template in templates:
         message = render_message_template(
@@ -340,9 +356,13 @@ def _send_markdown(settings: Settings, entry: dict[str, Any], message: str) -> b
         print(f"Skipped: webhook '{entry['webhook_name']}' has no URL configured.")
         return False
     try:
-        WeComWebhookClient(url).send_markdown(message)
+        _webhook_client(settings, url).send_markdown(message)
     except Exception as exc:  # noqa: BLE001 - one bad webhook must not stop the others
-        print(f"Failed: {entry['webhook_name']} / {entry['template_name']}: {exc}")
+        # SEC-04: `requests` puts the full URL — key included — into its exception text.
+        print(
+            "Failed: "
+            f"{redact(entry['webhook_name'])} / {redact(entry['template_name'])}: {redact(str(exc))}"
+        )
         return False
     print(f"Sent: {entry['webhook_name']} / {entry['template_name']} at {entry['send_time']}.")
     return True

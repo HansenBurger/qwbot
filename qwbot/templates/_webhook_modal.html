@@ -1,5 +1,6 @@
 <dialog class="modal" id="{{ modal_id }}">
   <form class="modal-card" method="post" action="{{ form_action }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <div class="modal-header">
       <h3>{{ modal_title }}</h3>
       <button type="button" class="icon-button" data-close-modal="{{ modal_id }}" aria-label="关闭">×</button>
@@ -52,6 +53,10 @@
             placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=..."
             required
           >
+          <small class="field-hint">
+            仅允许企业微信官方地址（qyapi.weixin.qq.com）；其他主机需管理员在 .env 的
+            QWBOT_ALLOWED_WEBHOOK_HOSTS 中加入，内网与本机地址一律拒绝。
+          </small>
         {% endif %}
       </label>
       <label class="wide">

@@ -16,7 +16,9 @@ the web service first. It can also be run manually:
 from __future__ import annotations
 
 import argparse
+import http.cookiejar
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -37,6 +39,10 @@ TEST_KEY = "MOCKTEST0001"
 BROKEN_KEY = "FAILDEV0001"
 BATCH_KEY = "MOCKBATCH001"
 SEND_TIME = "23:58"
+# A uuid-shaped key used only as leak bait; it only ever appears in a `.invalid` URL,
+# which cannot resolve, so no message can reach a real robot.
+OFFICIAL_KEY = "fbc143bc-e192-42d2-ad3b-bbc5df059e5f"
+OFFICIAL_URL = f"https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key={OFFICIAL_KEY}"
 EXTRA_TIME = "23:59"
 
 PASSED: list[str] = []
@@ -45,6 +51,11 @@ PASSED: list[str] = []
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *args, **kwargs):  # noqa: ANN002, ANN003, ARG002
         return None
+
+
+def _csrf_from_html(html: str) -> str:
+    match = re.search(r'name="csrf_token"[^>]*value="([^"]+)"', html)
+    return match.group(1) if match else ""
 
 
 def check(label: str, condition: bool, detail: str = "") -> None:
@@ -66,6 +77,8 @@ class Harness:
         webhook_base: str,
         db_path: Path,
         cli_command: str,
+        username: str = "admin",
+        password: str = "",
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.mock_url = mock_url.rstrip("/")
@@ -74,18 +87,85 @@ class Harness:
         self.webhook_base = webhook_base.rstrip("/")
         self.db_path = db_path
         self.cli_command = shlex.split(cli_command)
+        # SEC-01: the panel now needs a session plus a CSRF token on every POST.
+        self.username = username
+        self.password = password
+        self._cookies: http.cookiejar.CookieJar = http.cookiejar.CookieJar()
+        self._opener = urllib.request.build_opener(
+            NoRedirect, urllib.request.HTTPCookieProcessor(self._cookies)
+        )
+        self._csrf = ""
 
     # -- HTTP helpers ----------------------------------------------------
+    def login(self) -> None:
+        """Fetch /login for the CSRF token, then authenticate (SEC-01)."""
+        html = self.fetch("/login")
+        self._csrf = _csrf_from_html(html)
+        check("the login page offers a CSRF token", bool(self._csrf), html[:120])
+        status, location = self.post(
+            "/login",
+            {"username": self.username, "password": self.password, "next": "/notifications"},
+            csrf=False,
+        )
+        check("the panel accepted the test credentials", status == 302, f"{status} {location}")
+        # Login rotates the CSRF token; pick the fresh one up from the panel itself.
+        self.get("/notifications")
+
     def get(self, path: str) -> str:
-        with urllib.request.urlopen(f"{self.base_url}{path}") as response:
+        html = self.fetch(path)
+        # Keep the captured token in sync with the page we are actually reading; a
+        # server-side session rotation would otherwise make every later POST a 403.
+        token = _csrf_from_html(html)
+        if token:
+            self._csrf = token
+        return html
+
+    def fetch_raw(self, method: str, path: str, data: dict[str, str] | None = None) -> tuple[int, str]:
+        """Send a request WITHOUT the CSRF token, to prove the gate holds."""
+        body = urllib.parse.urlencode(data or {}).encode()
+        request = urllib.request.Request(f"{self.base_url}{path}", data=body, method=method)
+        try:
+            with self._opener.open(request) as response:
+                return response.status, urllib.parse.unquote_plus(
+                    response.headers.get("Location", "")
+                )
+        except urllib.error.HTTPError as exc:
+            exc.read()
+            return exc.code, urllib.parse.unquote_plus(exc.headers.get("Location", ""))
+
+    def post_raw(self, path: str, data: dict[str, str] | None = None) -> tuple[int, str]:
+        """POST with the CSRF token but without decoding the `Location` header."""
+        form = dict(data or {})
+        form.setdefault("csrf_token", self._csrf)
+        body = urllib.parse.urlencode(form).encode()
+        request = urllib.request.Request(f"{self.base_url}{path}", data=body, method="POST")
+        try:
+            with self._opener.open(request) as response:
+                return response.status, response.headers.get("Location", "")
+        except urllib.error.HTTPError as exc:
+            exc.read()
+            return exc.code, exc.headers.get("Location", "")
+
+    def fetch(self, path: str) -> str:
+        """GET without touching the captured CSRF token."""
+        with self._opener.open(f"{self.base_url}{path}") as response:
             return response.read().decode("utf-8")
 
-    def post(self, path: str, data: dict[str, str] | None = None) -> tuple[int, str]:
-        body = urllib.parse.urlencode(data or {}).encode()
+    def post(
+        self,
+        path: str,
+        data: dict[str, str] | None = None,
+        csrf: bool = True,
+    ) -> tuple[int, str]:
+        form = dict(data or {})
+        if csrf:
+            if not self._csrf:
+                raise AssertionError(f"no CSRF token captured before POST {path}")
+            form.setdefault("csrf_token", self._csrf)
+        body = urllib.parse.urlencode(form).encode()
         request = urllib.request.Request(f"{self.base_url}{path}", data=body, method="POST")
-        opener = urllib.request.build_opener(NoRedirect)
         try:
-            with opener.open(request) as response:
+            with self._opener.open(request) as response:
                 return response.status, urllib.parse.unquote_plus(
                     response.headers.get("Location", "")
                 )
@@ -211,6 +291,40 @@ def run(h: Harness) -> None:
     check("non-http url is rejected", "http" in location, location)
     _, location = h.post("/webhooks", {"name": "x", "url": h.mock_webhook_url(DEV_KEY)})
     check("duplicate url is rejected", "已存在于" in location, location)
+
+    # --- P0 security regressions (SEC-01 / SEC-03 / SEC-04) ---------------
+    status, _ = h.fetch_raw("POST", "/webhooks", {"name": "无令牌", "url": h.mock_webhook_url("NOTOKEN")})
+    check("a POST without the CSRF token is refused", status == 200, str(status))
+    check(
+        "no row was created by the token-less POST",
+        not any(item["name"] == "无令牌" for item in store.list_webhooks(h.db_path)),
+    )
+    _, location = h.post("/webhooks", {"name": "内网探针", "url": "http://10.1.2.3/latest/"})
+    check("RFC1918 SSRF target is rejected even in local mode", "内网" in location, location)
+    _, location = h.post("/webhooks", {"name": "链路本地", "url": "http://169.254.169.254/latest/meta-data/"})
+    check("link-local metadata target is rejected", "内网" in location, location)
+    _, location = h.post("/webhooks", {"name": "外部主机", "url": "https://attacker.example.com/send?key=x"})
+    check("non-whitelisted host is rejected", "不在允许列表" in location, location)
+    # SEC-04 end-to-end at the HTTP level. The row is inserted straight through the store
+    # (the route-level whitelist would refuse this host, which is the SEC-03 behaviour
+    # asserted above), then `POST /webhooks/<id>/test` runs the real client against a name
+    # under `.invalid`. DNS can never resolve it, so nothing reaches a real group while
+    # `requests` still puts the full key-bearing URL into the exception text — the exact
+    # input that used to leak into the redirect and the rendered page.
+    dead_url = f"https://qwbot-selftest.invalid/cgi-bin/webhook/send?key={OFFICIAL_KEY}"
+    dead_id = store.add_webhook(h.db_path, "不可达域名", dead_url, target="custom", is_enabled=True)
+    dead_id = int(dead_id)
+    code, raw_location = h.post_raw(f"/webhooks/{dead_id}/test")
+    # `post_raw` keeps the header as the server sent it, so the browser's own follow of
+    # the redirect can be replayed byte-for-byte (SEC-04 renders into that page).
+    target = raw_location.split("#")[0] if raw_location else "/notifications"
+    panel = h.get(target)
+    location = urllib.parse.unquote_plus(raw_location)
+    check("a failing connectivity test redirects", code == 302, str(code))
+    check("the Location carries no raw key", OFFICIAL_KEY not in location, location[:160])
+    check("the error branch names a category", "连通性测试失败" in location, location[:160])
+    check("the rendered page carries no raw key", OFFICIAL_KEY not in panel, "")
+    h.post(f"/webhooks/{dead_id}/delete")
 
     step("4. connectivity test and template test-send only hit their own robot")
     h.mock_reset()
@@ -468,6 +582,12 @@ def main() -> int:
         "(e.g. http://host.docker.internal:8089 when QWBot runs in Docker)",
     )
     parser.add_argument("--db", default="data/qwbot.sqlite3")
+    parser.add_argument("--username", default="admin", help="panel login user (SEC-01)")
+    parser.add_argument(
+        "--password",
+        default="",
+        help="panel login password; defaults to $QWBOT_WEB_PASSWORD (SEC-01)",
+    )
     parser.add_argument(
         "--cli-command",
         default=f"{sys.executable} -m qwbot.cli",
@@ -481,8 +601,11 @@ def main() -> int:
         args.webhook_base or args.mock_url,
         Path(args.db),
         args.cli_command,
+        username=args.username,
+        password=args.password or os.environ.get("QWBOT_WEB_PASSWORD", ""),
     )
     try:
+        harness.login()
         run(harness)
     except AssertionError as exc:
         print(f"\n[FAIL] {exc}")

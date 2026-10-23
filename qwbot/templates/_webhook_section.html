@@ -6,6 +6,7 @@
     </div>
     <div class="board-header-actions">
       <form method="post" action="{{ url_for('import_webhooks_from_env') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <button type="submit" class="ghost-button" title="把 .env 中的 webhook 补充到数据库，已存在的地址会跳过">从 .env 导入</button>
       </form>
       <button type="button" data-open-modal="create-webhook">+ 新增机器人</button>
@@ -36,19 +37,23 @@
           </div>
           <div class="webhook-actions">
             <form method="post" action="{{ url_for('test_webhook', webhook_id=webhook.id) }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
               <button type="submit" class="link-button" data-confirm="确认向「{{ webhook.name }}」发送连通性测试消息？">测试连通性</button>
             </form>
             <form method="post" action="{{ url_for('toggle_webhook_state', webhook_id=webhook.id) }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
               <button type="submit" class="link-button">{{ "停用" if webhook.is_enabled else "启用" }}</button>
             </form>
             {% if not webhook.is_default %}
               <form method="post" action="{{ url_for('mark_default_webhook', webhook_id=webhook.id) }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <button type="submit" class="link-button" title="跑批开始/完成等即时通知会发到默认机器人">设为默认</button>
               </form>
             {% endif %}
             <button type="button" class="link-button" data-open-modal="edit-webhook-{{ webhook.id }}">编辑</button>
             {% if webhook_count > 1 %}
               <form method="post" action="{{ url_for('remove_webhook', webhook_id=webhook.id) }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <button
                   type="submit"
                   class="link-button danger-text"
@@ -78,15 +83,19 @@
                 <div class="template-card-actions">
                   <button type="button" class="link-button" data-open-modal="edit-template-{{ template.id }}">编辑内容</button>
                   <form method="post" action="{{ url_for('test_send_message_template', template_id=template.id) }}">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <button type="submit" class="link-button" data-confirm="确认把模板「{{ template.name }}」发送到「{{ webhook.name }}」？">测试发送</button>
                   </form>
                   <form method="post" action="{{ url_for('toggle_message_template_state', template_id=template.id) }}">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <button type="submit" class="link-button">{{ "停用" if template.is_enabled else "启用" }}</button>
                   </form>
                   <form method="post" action="{{ url_for('copy_message_template', template_id=template.id) }}">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <button type="submit" class="link-button">复制</button>
                   </form>
                   <form method="post" action="{{ url_for('remove_message_template', template_id=template.id) }}">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <button
                       type="submit"
                       class="link-button danger-text"
@@ -104,6 +113,7 @@
                     id="schedule-{{ schedule.id }}"
                   >
                     <form method="post" action="{{ url_for('toggle_template_schedule_state', schedule_id=schedule.id) }}">
+                      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                       <button
                         type="submit"
                         class="schedule-chip-time"
@@ -120,6 +130,7 @@
                       aria-label="修改通知时间 {{ schedule.send_time }}"
                     >✎</button>
                     <form method="post" action="{{ url_for('remove_template_schedule', schedule_id=schedule.id) }}">
+                      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                       <button
                         type="submit"
                         class="schedule-chip-delete"
@@ -141,6 +152,7 @@
               <div class="template-date-strip">
                 <span class="strip-label">日期覆盖</span>
                 <form class="template-date-form" method="post" action="{{ url_for('skip_template_date', template_id=template.id) }}">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                   <input type="date" name="target_date" required aria-label="选择日期">
                   <button type="submit" class="mini-button">跳过</button>
                   <button
@@ -153,6 +165,7 @@
                   <span class="override-chip {{ entry.mode }}">
                     {{ entry.date }} · {{ "跳过" if entry.mode == "skip" else "生效" }}
                     <form method="post" action="{{ url_for('remove_template_date_override', template_id=template.id) }}">
+                      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                       <input type="hidden" name="target_date" value="{{ entry.date }}">
                       <button type="submit" aria-label="删除日期覆盖 {{ entry.date }}">×</button>
                     </form>

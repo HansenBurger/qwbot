@@ -95,7 +95,9 @@ class MockWebhookHandler(BaseHTTPRequestHandler):
                 "payload": payload,
             }
         )
-        print(f"[mock-webhook] key={key or '(none)'} content={_extract_content(payload)!r}")
+        # SEC-04: never echo a full key into the console/log, even in this local mock.
+        masked = f"{key[:4]}****" if len(key) > 8 else ("****" if key else "(none)")
+        print(f"[mock-webhook] key={masked} content={_extract_content(payload)!r}")
 
         if key.startswith("HTTP500"):
             self._json(500, {"errcode": 500, "errmsg": "simulated upstream failure"})

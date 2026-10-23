@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -11,9 +12,16 @@ import pytest
 from qwbot import store
 from qwbot.config import Settings
 
-MOCK_PROD_URL = "http://mock.invalid/cgi-bin/webhook/send?key=MOCKPRODKEY0001"
-MOCK_TEST_URL = "http://mock.invalid/cgi-bin/webhook/send?key=MOCKTESTKEY0001"
-MOCK_CUSTOM_URL = "http://mock.invalid/cgi-bin/webhook/send?key=MOCKCUSTOMKEY01"
+# `mock.invalid` is the shared stand-in host for these suites. SEC-03 keeps it out of the
+# production default whitelist, so tests opt in explicitly through this variable.
+MOCK_WEBHOOK_HOST = "mock.invalid"
+MOCK_PROD_URL = f"http://{MOCK_WEBHOOK_HOST}/cgi-bin/webhook/send?key=MOCKPRODKEY0001"
+MOCK_TEST_URL = f"http://{MOCK_WEBHOOK_HOST}/cgi-bin/webhook/send?key=MOCKTESTKEY0001"
+MOCK_CUSTOM_URL = f"http://{MOCK_WEBHOOK_HOST}/cgi-bin/webhook/send?key=MOCKCUSTOMKEY01"
+
+# The panel password the fixtures log in with (SEC-01). Tests that want the gate closed
+# build their own `Settings` with a different value or use `anon_client`.
+TEST_WEB_PASSWORD = "unit-test-panel-password"
 
 
 def make_settings(db_path: Path, **overrides: Any) -> Settings:
@@ -37,6 +45,15 @@ def make_settings(db_path: Path, **overrides: Any) -> Settings:
         "frontend_url": "http://127.0.0.1:5000",
         "local_status_file": db_path.parent / "sample_status.json",
         "db_path": db_path,
+        # The panel is guarded in production. Tests that exercise routes log in through
+        # `login()` below, so the default fixture carries a password rather than leaving
+        # the gate open.
+        "web_username": "admin",
+        "web_password": TEST_WEB_PASSWORD,
+        "secret_key": None,
+        "allowed_webhook_hosts": (MOCK_WEBHOOK_HOST,),
+        "allow_insecure_local_webhooks": False,
+        "secure_cookies": False,
     }
     defaults.update(overrides)
     return Settings(**defaults)
@@ -51,6 +68,78 @@ def init_db(path: Path, settings: Settings | None = None) -> None:
         webhook_seeds=settings.webhook_seeds(),
         default_target=settings.default_seed_target(),
     )
+
+
+def login(client: Any, password: str = TEST_WEB_PASSWORD, username: str = "admin") -> bool:
+    """Authenticate a Flask test client so it can pass the SEC-01 gate.
+
+    Returns True when the panel accepted the credentials. The CSRF token is read back from
+    the rendered form rather than the session cookie because the session is signed.
+    """
+    page = client.get("/login")
+    token = _csrf_from_html(page.get_data(as_text=True))
+    if not token:
+        return False
+    response = client.post(
+        "/login",
+        data={"username": username, "password": password, "csrf_token": token},
+    )
+    return response.status_code == 302
+
+
+class PanelClient:
+    """A test client that behaves like the real panel for a logged-in operator.
+
+    `post()` adds the current CSRF token unless the caller already supplied one (or opted
+    out with `csrf=False`), and reads it through the same channel the browser uses — the
+    hidden field of a rendered page. That keeps the SEC-01 gate enforced in production and
+    still lets route tests exercise the handlers.
+    """
+
+    def __init__(self, client: Any, db_path: Path | None = None) -> None:
+        self._client = client
+        # Route tests reach for the database behind the app; keep it on the wrapper so a
+        # test can assert on stored rows without another fixture argument.
+        self.db_path = db_path
+        self._token_source = "/notifications"
+
+    def post(self, url: str, data: Any = None, csrf: bool = True, **kwargs: Any):
+        form = dict(data or {})
+        if csrf and "csrf_token" not in form and "csrf_token" not in kwargs:
+            form["csrf_token"] = self.csrf_token()
+        return self._client.post(url, data=form, **kwargs)
+
+    def get(self, *args: Any, **kwargs: Any):
+        return self._client.get(*args, **kwargs)
+
+    def raw(self) -> Any:
+        """The underlying Flask test client, for tests that must dodge the wrapper."""
+        return self._client
+
+    def csrf_token(self, path: str | None = None) -> str:
+        html = self._client.get(path or self._token_source).get_data(as_text=True)
+        token = _csrf_from_html(html)
+        if not token:
+            raise AssertionError(f"no CSRF token found on {path or self._token_source}")
+        return token
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._client, name)
+
+
+def panel_client(client: Any) -> PanelClient:
+    """Wrap an authenticated Flask test client."""
+    return PanelClient(client)
+
+
+def _csrf_from_html(html: str) -> str:
+    match = re.search(r'name="csrf_token"[^>]*value="([^"]+)"', html)
+    return match.group(1) if match else ""
+
+
+def csrf_token_for(client: Any, path: str = "/notifications") -> str:
+    """Read the CSRF token embedded in a page the client is allowed to see."""
+    return _csrf_from_html(client.get(path).get_data(as_text=True))
 
 
 LEGACY_DDL = [
@@ -208,8 +297,33 @@ def legacy_db(db_path: Path):
 
 
 @pytest.fixture()
-def app_client(db_path: Path, settings: Settings):
-    """Flask test client bound to an isolated database."""
+def app_client(logged_in_client):
+    """Flask test client bound to an isolated database, already signed in."""
+    return logged_in_client
+
+
+@pytest.fixture()
+def logged_in_client(db_path: Path, settings: Settings):
+    """Flask test client that passed the SEC-01 login (and therefore holds a CSRF token)."""
+    from qwbot.web import create_app
+
+    init_db(db_path, settings)
+    app = create_app(settings)
+    app.config["TESTING"] = True
+    with app.test_client() as client:
+        assert login(client), "the test login should succeed"
+        yield PanelClient(client, db_path)
+
+
+@pytest.fixture()
+def auth_client(logged_in_client):
+    """Alias for a signed-in client, for tests that want to be explicit about it."""
+    return logged_in_client
+
+
+@pytest.fixture()
+def anon_client(db_path: Path, settings: Settings):
+    """Flask test client with no session at all — what an attacker or a bot sees."""
     from qwbot.web import create_app
 
     init_db(db_path, settings)

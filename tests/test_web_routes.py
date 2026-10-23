@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sqlite3
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote_plus
@@ -10,7 +12,15 @@ import pytest
 
 from qwbot import store
 from qwbot import web as web_module
-from tests.conftest import MOCK_CUSTOM_URL, MOCK_PROD_URL, MOCK_TEST_URL, init_db, make_settings
+from tests.conftest import (
+    MOCK_CUSTOM_URL,
+    MOCK_PROD_URL,
+    MOCK_TEST_URL,
+    PanelClient,
+    init_db,
+    login,
+    make_settings,
+)
 
 
 class FakeWebhookClient:
@@ -18,7 +28,15 @@ class FakeWebhookClient:
 
     sent: list[dict[str, Any]] = []
 
-    def __init__(self, webhook_url: str, timeout_seconds: int = 10) -> None:
+    def __init__(
+        self,
+        webhook_url: str,
+        timeout_seconds: int = 10,
+        *,
+        allowed_hosts: Any = None,
+        allow_local: bool = False,
+        enforce_allowlist: bool = True,
+    ) -> None:
         self.webhook_url = webhook_url
 
     def send_markdown(self, content: str) -> None:
@@ -40,6 +58,21 @@ def no_real_sends(monkeypatch: pytest.MonkeyPatch):
 
 @pytest.fixture()
 def client(db_path: Path):
+    """A signed-in panel client: SEC-01 gates every mutating route behind a login."""
+    from qwbot.web import create_app
+
+    settings = make_settings(db_path)
+    init_db(db_path, settings)
+    app = create_app(settings)
+    app.config["TESTING"] = True
+    with app.test_client() as test_client:
+        assert login(test_client), "the test login should succeed"
+        yield PanelClient(test_client, db_path)
+
+
+@pytest.fixture()
+def anon_client(db_path: Path):
+    """No session at all — the view an unauthenticated visitor or a CSRF bot gets."""
     from qwbot.web import create_app
 
     settings = make_settings(db_path)
@@ -627,3 +660,47 @@ def test_mask_webhook_url() -> None:
     long_url = "https://example.com/some/very/long/webhook/path/without/key"
     masked = web_module.mask_webhook_url(long_url)
     assert "****" in masked and masked != long_url
+
+
+def test_first_run_archives_all_past_completed_batches_in_one_transaction(
+    client, db_path: Path
+) -> None:
+    """P1: the auto-archive sweep is one write transaction, not one commit per row."""
+    # Same clock the route uses, so "today" matches what `_archive_completed_from_previous_days`
+    # compares against; only the timezone-aware part is ours.
+    today = date.fromisoformat(web_module._today_iso("Asia/Shanghai"))
+    for offset in range(1, 61):
+        day = (today - timedelta(days=offset)).isoformat()
+        store.add_item(
+            db_path,
+            "batch_plan",
+            {
+                "content": f"批 {offset}",
+                "natural_date": day,
+                "date": day,
+                "batch_start_time": "08:00",
+                "execution_status": "已完成",
+                "status": "已完成",
+                "completed_on": day,
+            },
+        )
+
+    real_connect = sqlite3.connect
+    calls: list[int] = []
+
+    def counting_connect(*args: object, **kwargs: object) -> sqlite3.Connection:
+        calls.append(1)
+        return real_connect(*args, **kwargs)  # type: ignore[arg-return]
+
+    sqlite3.connect = counting_connect  # type: ignore[assignment]
+    try:
+        response = client.get("/")
+    finally:
+        sqlite3.connect = real_connect  # type: ignore[assignment]
+
+    assert response.status_code == 200
+    archived = [item for item in store.load_status_file(db_path)["batch_plan"] if item["archived"] == "true"]
+    assert len(archived) == 60
+    # One connection per read section plus ONE for the whole archive sweep. Row-by-row
+    # updates would have added 60 more.
+    assert len(calls) < 20, f"archive sweep opened {len(calls)} connections"

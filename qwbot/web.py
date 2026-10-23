@@ -1,12 +1,24 @@
 from __future__ import annotations
 
+import hmac
+import logging
 import re
+import secrets
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlparse
 from zoneinfo import ZoneInfo
 
-from flask import Flask, redirect, render_template, request, url_for
+from flask import (
+    Flask,
+    redirect,
+    render_template,
+    request,
+    session,
+    url_for,
+)
 
 from qwbot.config import Settings
 from qwbot.message import (
@@ -21,11 +33,14 @@ from qwbot.planner import (
     next_batch_after,
     sort_key,
 )
+from qwbot.security import classify_send_error as _classify_send_error_impl
+from qwbot.security import mask_webhook_url as mask_webhook_url_impl
+from qwbot.security import redact, validate_webhook_url
 from qwbot.store import (
     DEFAULT_REMINDER_TEMPLATE,
     REMINDER_TEMPLATE_VARS,
-    WEBHOOK_TARGETS,
     WEBHOOK_TARGET_LABELS,
+    WEBHOOK_TARGETS,
     add_block_event,
     add_item,
     add_message_template,
@@ -70,6 +85,7 @@ from qwbot.store import (
     update_template_schedule,
     update_template_var,
     update_webhook,
+    write_items,
 )
 from qwbot.wecom import WeComWebhookClient
 
@@ -80,6 +96,35 @@ DATE_RULE_LABELS = {
 }
 CONNECTIVITY_TEST_TEXT = "企业微信机器人连通性测试成功。"
 WEBHOOK_FORM_TARGETS = WEBHOOK_TARGETS
+SESSION_LOGGED_IN_KEY = "qwbot_logged_in"
+CSRF_SESSION_KEY = "qwbot_csrf_token"
+CSRF_FIELD_NAME = "csrf_token"
+LOGIN_SESSION_MAX_AGE_SECONDS = 12 * 60 * 60
+# SEC-01: every route that changes state, plus the panel that lists the robots.
+AUTH_EXEMPT_ENDPOINTS = frozenset({"static", "login", "logout"})
+# GETs that keep working without a session (the scheduler CLI and monitoring hit them).
+READ_ONLY_PUBLIC_ENDPOINTS = frozenset()
+
+logger = logging.getLogger("qwbot.web")
+
+
+def _credential_matches(expected: str | None, provided: str | None) -> bool:
+    """Constant-time comparison of two optional secrets."""
+    if not expected or provided is None:
+        return False
+    return hmac.compare_digest(expected.encode("utf-8"), provided.encode("utf-8"))
+
+
+def secured(route: Callable[..., Any]) -> Callable[..., Any]:
+    """Mark a route as requiring a logged-in operator (SEC-01).
+
+    Every state-changing route in this panel gets it; read-only pages keep working so the
+    scheduler and monitoring probes are not locked out. The marker is read by
+    `_endpoint_needs_auth` through `__qwbot_secured__`, which survives Flask's own
+    `functools.update_wrapper` copying of `__dict__`.
+    """
+    route.__qwbot_secured__ = True  # type: ignore[attr-defined]
+    return route
 
 
 def create_app(settings: Settings) -> Flask:
@@ -92,10 +137,112 @@ def create_app(settings: Settings) -> Flask:
         default_target=settings.default_seed_target(),
     )
 
+    # SEC-01: a signing key for the session cookie. Without `QWBOT_SECRET_KEY` we mint a
+    # throwaway one per process, so sessions end on restart instead of being guessable.
+    app.secret_key = settings.secret_key or secrets.token_bytes(32)
+    app.permanent_session_lifetime = timedelta(seconds=LOGIN_SESSION_MAX_AGE_SECONDS)
+    app.config.update(
+        SESSION_COOKIE_HTTPONLY=True,
+        SESSION_COOKIE_SAMESITE="Lax",
+        # `QWBOT_SECURE_COOKIES=1` for a TLS-terminated deployment. Without it the cookie
+        # travels over plain HTTP too, which is what local development and the self-test
+        # use; a Secure-only cookie would silently break login there.
+        SESSION_COOKIE_SECURE=settings.secure_cookies,
+    )
+    # `_validate_webhook_url` reads the whitelist from the app serving the request.
+    app.extensions["qwbot_settings"] = settings
+
+    @app.before_request
+    def require_login():
+        """Guard every mutating route and the notification panel (SEC-01)."""
+        endpoint = request.endpoint or ""
+        if endpoint in AUTH_EXEMPT_ENDPOINTS:
+            return None
+        if _is_authenticated():
+            return None
+        if request.method not in {"POST", "PUT", "PATCH", "DELETE"} and not _endpoint_needs_auth(
+            endpoint
+        ):
+            # Public read-only page (the batch board): let it render, the templates show a
+            # login link instead of the mutating controls.
+            return None
+        if endpoint == "submit_login":
+            # POST /login is the way in; answering it with "log in first" would deadlock.
+            return None
+        if request.method in {"GET", "HEAD"}:
+            return redirect(url_for("login", next=request.full_path))
+        return _login_response(error="请先登录后再提交修改"), 401
+
+    @app.before_request
+    def verify_csrf_token():
+        """Reject cross-site form posts on every state-changing request (SEC-01)."""
+        endpoint = request.endpoint or ""
+        if endpoint in AUTH_EXEMPT_ENDPOINTS:
+            return None
+        if request.method not in {"POST", "PUT", "PATCH", "DELETE"}:
+            return None
+        if endpoint == "submit_login":
+            # The form embeds the token minted by `GET /login`, which is exactly what a
+            # cross-site attacker cannot read. Checking it against the session would need
+            # a session that only exists after a successful login, so this route is exempt.
+            return None
+        if not _is_authenticated():
+            return None  # `require_login` already answered this one.
+        submitted = request.form.get(CSRF_FIELD_NAME) or request.headers.get("X-CSRF-Token")
+        if _credential_matches(_csrf_token(), submitted):
+            return None
+        if request.method == "POST":
+            return _login_response(error="页面已过期，请重新登录后再提交")
+        return ("Forbidden", 403)
+
+    @app.context_processor
+    def inject_template_helpers():
+        # `can_operate` is the page-level switch: anonymous visitors of the read-only batch
+        # board get no mutating controls (SEC-01). It is evaluated per request, not frozen
+        # at first render.
+        return {
+            "csrf_token": _csrf_token,
+            "is_authenticated": _is_authenticated,
+            "can_operate": _is_authenticated(),
+        }
+
+    @app.get("/login")
+    def login():
+        if _is_authenticated():
+            return redirect(_safe_next(request.args.get("next")))
+        return render_template("login.html", error=None, next=request.args.get("next") or "")
+
+    @app.post("/login")
+    def submit_login():
+        next_url = _safe_next(request.form.get("next"))
+        if not settings.web_password:
+            logger.error("login attempted while QWBOT_WEB_PASSWORD is not configured")
+            return _login_response(error="面板尚未配置登录口令，请在 .env 设置 QWBOT_WEB_PASSWORD", next_url=next_url)
+        supplied_user = (request.form.get("username") or "").strip()
+        password = request.form.get("password") or ""
+        user_ok = _credential_matches(settings.web_username, supplied_user)
+        password_ok = _credential_matches(settings.web_password, password)
+        if not (user_ok and password_ok):
+            # Same wording either way; do not tell which half was wrong.
+            logger.warning("failed login attempt for user %r", redact(supplied_user)[:64])
+            return _login_response(error="用户名或口令不正确", next_url=next_url)
+        session.permanent = True
+        session[SESSION_LOGGED_IN_KEY] = True
+        session[CSRF_SESSION_KEY] = secrets.token_urlsafe(32)
+        return redirect(next_url)
+
+    @app.post("/logout")
+    def logout():
+        session.clear()
+        return redirect(url_for("login"))
+
     @app.get("/")
     def index():
         payload = load_status_file(status_file)
-        _archive_completed_from_previous_days(status_file, payload, settings.timezone)
+        # The auto-archive sweep is a write; it belongs to the operator's visit, not to an
+        # anonymous page view (SEC-01).
+        if _is_authenticated():
+            _archive_completed_from_previous_days(status_file, payload, settings.timezone)
         view = request.args.get("view", "active")
         filters = _archive_filters_from_request()
         if view == "archived" and not _has_archive_filter_args():
@@ -133,6 +280,9 @@ def create_app(settings: Settings) -> Flask:
             view=view,
             status_file=_display_path(status_file),
             batch_notify_enabled=batch_event_notify_enabled(status_file),
+            # SEC-01: the board is readable without a session, so its mutating controls are
+            # rendered only for someone who logged in.
+            can_operate=_is_authenticated(),
         )
 
     @app.get("/notifications")
@@ -164,11 +314,13 @@ def create_app(settings: Settings) -> Flask:
         )
 
     @app.post("/items/<collection>")
+    @secured
     def create_item(collection: str):
         add_item(status_file, collection, _item_from_form())
         return redirect(url_for("index"))
 
     @app.post("/items/<collection>/<int:index>")
+    @secured
     def edit_item(collection: str, index: int):
         existing_item = get_item(status_file, collection, index)
         if collection == "batch_plan" and _is_archived(existing_item):
@@ -183,6 +335,7 @@ def create_app(settings: Settings) -> Flask:
         return redirect(url_for("index"))
 
     @app.post("/items/<collection>/<int:index>/delete")
+    @secured
     def remove_item(collection: str, index: int):
         if collection == "batch_plan":
             item = get_item(status_file, collection, index)
@@ -194,6 +347,7 @@ def create_app(settings: Settings) -> Flask:
         return redirect(url_for("index"))
 
     @app.post("/items/batch_plan/<int:index>/archive")
+    @secured
     def archive_item(index: int):
         item = get_item(status_file, "batch_plan", index)
         if not is_completed(item):
@@ -204,6 +358,7 @@ def create_app(settings: Settings) -> Flask:
         return redirect(url_for("index"))
 
     @app.post("/items/batch_plan/<int:index>/start")
+    @secured
     def start_item(index: int):
         payload = load_status_file(status_file)
         item = get_item(status_file, "batch_plan", index)
@@ -224,6 +379,7 @@ def create_app(settings: Settings) -> Flask:
         return redirect(url_for("index"))
 
     @app.post("/items/batch_plan/<int:index>/complete")
+    @secured
     def complete_item(index: int):
         payload = load_status_file(status_file)
         item = get_item(status_file, "batch_plan", index)
@@ -247,6 +403,7 @@ def create_app(settings: Settings) -> Flask:
         return redirect(url_for("index"))
 
     @app.post("/items/batch_plan/<int:index>/close-block")
+    @secured
     def close_block(index: int):
         item = get_item(status_file, "batch_plan", index)
         if _is_archived(item) or _execution_status(item) != "有阻塞":
@@ -263,6 +420,7 @@ def create_app(settings: Settings) -> Flask:
     # ------------------------------------------------------------------
 
     @app.post("/batch-event-notify")
+    @secured
     def update_batch_event_notify():
         """Switch the per-batch 开始/完成 push; the day's times go out with the templates."""
         enabled = _flag("enabled")
@@ -277,15 +435,15 @@ def create_app(settings: Settings) -> Flask:
         )
 
     @app.post("/webhooks")
+    @secured
     def create_webhook():
         name = request.form.get("name", "").strip()
         url = request.form.get("url", "").strip()
         if not name:
             return _notification_redirect(error="请填写机器人名称")
-        if not url:
-            return _notification_redirect(error="请填写机器人 webhook 地址")
-        if not _is_valid_webhook_url(url):
-            return _notification_redirect(error="webhook 地址必须以 http:// 或 https:// 开头")
+        valid, message = _validate_webhook_url(url)
+        if not valid:
+            return _notification_redirect(error=message)
         duplicate = _find_webhook_by_url(status_file, url)
         if duplicate:
             return _notification_redirect(error=f"该 webhook 地址已存在于「{duplicate['name']}」")
@@ -313,17 +471,21 @@ def create_app(settings: Settings) -> Flask:
         return _notification_redirect(notice=f"已新增机器人「{name}」", anchor=f"webhook-{webhook_id}")
 
     @app.post("/webhooks/import-env")
+    @secured
     def import_webhooks_from_env():
         added = import_env_webhooks(
             status_file,
             settings.webhook_seeds(),
             settings.default_seed_target(),
+            allowed_hosts=settings.allowed_webhook_hosts,
+            allow_local=settings.allow_insecure_local_webhooks,
         )
         if added:
             return _notification_redirect(notice=f"已从 .env 导入 {added} 个机器人")
         return _notification_redirect(notice=".env 中没有新的 webhook 需要导入")
 
     @app.post("/webhooks/<int:webhook_id>")
+    @secured
     def edit_webhook(webhook_id: int):
         webhook = get_webhook(status_file, webhook_id)
         if webhook is None:
@@ -332,8 +494,10 @@ def create_app(settings: Settings) -> Flask:
         submitted_url = request.form.get("url", "").strip()
         if not name:
             return _notification_redirect(error="请填写机器人名称")
-        if submitted_url and not _is_valid_webhook_url(submitted_url):
-            return _notification_redirect(error="webhook 地址必须以 http:// 或 https:// 开头")
+        if submitted_url:
+            valid, message = _validate_webhook_url(submitted_url)
+            if not valid:
+                return _notification_redirect(error=message)
         # The edit form never renders the stored key, so an empty field means
         # "keep the current URL" unless the operator explicitly asks to clear it.
         if submitted_url:
@@ -357,6 +521,7 @@ def create_app(settings: Settings) -> Flask:
         return _notification_redirect(notice=f"已保存机器人「{name}」", anchor=f"webhook-{webhook_id}")
 
     @app.post("/webhooks/<int:webhook_id>/delete")
+    @secured
     def remove_webhook(webhook_id: int):
         webhook = get_webhook(status_file, webhook_id)
         if webhook is None:
@@ -364,10 +529,13 @@ def create_app(settings: Settings) -> Flask:
         try:
             delete_webhook(status_file, webhook_id)
         except ValueError as exc:
-            return _notification_redirect(error=str(exc))
+            # The message is about a template count, never about a key; log the detail.
+            _log_send_exception("webhook delete rejected", exc, [])
+            return _notification_redirect(error=redact(str(exc)))
         return _notification_redirect(notice=f"已删除机器人「{webhook['name']}」及其模板和时间")
 
     @app.post("/webhooks/<int:webhook_id>/toggle")
+    @secured
     def toggle_webhook_state(webhook_id: int):
         if get_webhook(status_file, webhook_id) is None:
             return _notification_redirect(error="机器人不存在")
@@ -378,6 +546,7 @@ def create_app(settings: Settings) -> Flask:
         )
 
     @app.post("/webhooks/<int:webhook_id>/set-default")
+    @secured
     def mark_default_webhook(webhook_id: int):
         webhook = get_webhook(status_file, webhook_id)
         if webhook is None:
@@ -388,6 +557,7 @@ def create_app(settings: Settings) -> Flask:
         )
 
     @app.post("/webhooks/<int:webhook_id>/test")
+    @secured
     def test_webhook(webhook_id: int):
         webhook = get_webhook(status_file, webhook_id)
         if webhook is None:
@@ -399,10 +569,11 @@ def create_app(settings: Settings) -> Flask:
                 anchor=f"webhook-{webhook_id}",
             )
         try:
-            WeComWebhookClient(url).send_text(CONNECTIVITY_TEST_TEXT)
-        except Exception as exc:  # noqa: BLE001 - surfaced to the operator in the UI
+            _webhook_client(url).send_text(CONNECTIVITY_TEST_TEXT)
+        except Exception as exc:  # noqa: BLE001 - the operator only sees a category
+            _log_send_exception(f"connectivity test for webhook {webhook_id}", exc, [url])
             return _notification_redirect(
-                error=f"机器人「{webhook['name']}」连通性测试失败：{exc}",
+                error=f"机器人「{webhook['name']}」连通性测试失败：{_classify_send_failure(exc, url)}",
                 anchor=f"webhook-{webhook_id}",
             )
         return _notification_redirect(
@@ -411,6 +582,7 @@ def create_app(settings: Settings) -> Flask:
         )
 
     @app.post("/webhooks/<int:webhook_id>/templates")
+    @secured
     def create_message_template(webhook_id: int):
         webhook = get_webhook(status_file, webhook_id)
         if webhook is None:
@@ -435,6 +607,7 @@ def create_app(settings: Settings) -> Flask:
         )
 
     @app.post("/templates/<int:template_id>")
+    @secured
     def edit_message_template(template_id: int):
         template = get_message_template(status_file, template_id)
         if template is None:
@@ -454,6 +627,7 @@ def create_app(settings: Settings) -> Flask:
         return _notification_redirect(notice=f"已保存模板「{name}」", anchor=f"template-{template_id}")
 
     @app.post("/templates/<int:template_id>/delete")
+    @secured
     def remove_message_template(template_id: int):
         template = get_message_template(status_file, template_id)
         if template is None:
@@ -465,6 +639,7 @@ def create_app(settings: Settings) -> Flask:
         )
 
     @app.post("/templates/<int:template_id>/toggle")
+    @secured
     def toggle_message_template_state(template_id: int):
         template = get_message_template(status_file, template_id)
         if template is None:
@@ -476,6 +651,7 @@ def create_app(settings: Settings) -> Flask:
         )
 
     @app.post("/templates/<int:template_id>/duplicate")
+    @secured
     def copy_message_template(template_id: int):
         template = get_message_template(status_file, template_id)
         if template is None:
@@ -486,6 +662,7 @@ def create_app(settings: Settings) -> Flask:
         )
 
     @app.post("/templates/<int:template_id>/test-send")
+    @secured
     def test_send_message_template(template_id: int):
         template = get_message_template(status_file, template_id)
         if template is None:
@@ -512,10 +689,12 @@ def create_app(settings: Settings) -> Flask:
             batch_plan=payload["batch_plan"],
         )
         try:
-            WeComWebhookClient(url).send_markdown(message)
-        except Exception as exc:  # noqa: BLE001 - surfaced to the operator in the UI
+            _webhook_client(url).send_markdown(message)
+        except Exception as exc:  # noqa: BLE001 - the operator only sees a category
+            _log_send_exception(f"test-send for template {template_id}", exc, [url])
             return _notification_redirect(
-                error=f"测试发送失败：{exc}", anchor=f"template-{template_id}"
+                error=f"测试发送失败：{_classify_send_failure(exc, url)}",
+                anchor=f"template-{template_id}",
             )
         return _notification_redirect(
             notice=f"已测试发送到「{webhook['name'] if webhook else '机器人'}」",
@@ -523,6 +702,7 @@ def create_app(settings: Settings) -> Flask:
         )
 
     @app.post("/templates/<int:template_id>/schedules")
+    @secured
     def create_template_schedule(template_id: int):
         template = get_message_template(status_file, template_id)
         if template is None:
@@ -539,12 +719,13 @@ def create_app(settings: Settings) -> Flask:
                 is_enabled=_flag("is_enabled", True),
             )
         except ValueError as exc:
-            return _notification_redirect(error=str(exc), anchor=f"template-{template_id}")
+            return _notification_redirect(error=redact(str(exc)), anchor=f"template-{template_id}")
         return _notification_redirect(
             notice=f"已新增通知时间 {send_time}", anchor=f"schedule-{schedule_id}"
         )
 
     @app.post("/schedules/<int:schedule_id>")
+    @secured
     def edit_template_schedule(schedule_id: int):
         schedule = _find_schedule(status_file, schedule_id)
         if schedule is None:
@@ -566,12 +747,15 @@ def create_app(settings: Settings) -> Flask:
                 ),
             )
         except ValueError as exc:
-            return _notification_redirect(error=str(exc), anchor=f"template-{schedule['template_id']}")
+            return _notification_redirect(
+                error=redact(str(exc)), anchor=f"template-{schedule['template_id']}"
+            )
         return _notification_redirect(
             notice=f"通知时间已更新为 {send_time}", anchor=f"template-{schedule['template_id']}"
         )
 
     @app.post("/schedules/<int:schedule_id>/delete")
+    @secured
     def remove_template_schedule(schedule_id: int):
         schedule = _find_schedule(status_file, schedule_id)
         if schedule is None:
@@ -582,6 +766,7 @@ def create_app(settings: Settings) -> Flask:
         )
 
     @app.post("/schedules/<int:schedule_id>/toggle")
+    @secured
     def toggle_template_schedule_state(schedule_id: int):
         schedule = _find_schedule(status_file, schedule_id)
         if schedule is None:
@@ -593,6 +778,7 @@ def create_app(settings: Settings) -> Flask:
         )
 
     @app.post("/templates/<int:template_id>/skip-date")
+    @secured
     def skip_template_date(template_id: int):
         set_template_date_override(
             status_file, template_id, request.form.get("target_date", ""), "skip"
@@ -600,6 +786,7 @@ def create_app(settings: Settings) -> Flask:
         return _notification_redirect(anchor=f"template-{template_id}")
 
     @app.post("/templates/<int:template_id>/force-date")
+    @secured
     def force_template_date(template_id: int):
         set_template_date_override(
             status_file, template_id, request.form.get("target_date", ""), "force"
@@ -607,6 +794,7 @@ def create_app(settings: Settings) -> Flask:
         return _notification_redirect(anchor=f"template-{template_id}")
 
     @app.post("/templates/<int:template_id>/date-overrides/delete")
+    @secured
     def remove_template_date_override(template_id: int):
         delete_template_date_override(
             status_file, template_id, request.form.get("target_date", "")
@@ -614,26 +802,31 @@ def create_app(settings: Settings) -> Flask:
         return _notification_redirect(anchor=f"template-{template_id}")
 
     @app.post("/scheduler-skip-dates")
+    @secured
     def create_scheduler_skip_date():
         add_scheduler_skip_date(status_file, request.form.get("skip_date", ""))
         return redirect(url_for("notification_page"))
 
     @app.post("/scheduler-skip-dates/delete")
+    @secured
     def remove_scheduler_skip_date():
         delete_scheduler_skip_date(status_file, request.form.get("skip_date", ""))
         return redirect(url_for("notification_page"))
 
     @app.post("/scheduler-force-dates")
+    @secured
     def create_scheduler_force_date():
         add_scheduler_force_date(status_file, request.form.get("force_date", ""))
         return redirect(url_for("notification_page"))
 
     @app.post("/scheduler-force-dates/delete")
+    @secured
     def remove_scheduler_force_date():
         delete_scheduler_force_date(status_file, request.form.get("force_date", ""))
         return redirect(url_for("notification_page"))
 
     @app.post("/template-vars")
+    @secured
     def create_template_var():
         var_name = request.form.get("var_name", "").strip()
         var_label = request.form.get("var_label", "").strip()
@@ -647,6 +840,7 @@ def create_app(settings: Settings) -> Flask:
         return redirect(url_for("notification_page"))
 
     @app.post("/template-vars/<int:var_id>")
+    @secured
     def edit_template_var(var_id: int):
         var_name = request.form.get("var_name", "").strip()
         var_label = request.form.get("var_label", "").strip()
@@ -660,6 +854,7 @@ def create_app(settings: Settings) -> Flask:
         return redirect(url_for("notification_page"))
 
     @app.post("/template-vars/<int:var_id>/delete")
+    @secured
     def remove_template_var(var_id: int):
         delete_template_var(status_file, var_id)
         return redirect(url_for("notification_page"))
@@ -674,9 +869,12 @@ def _notification_redirect(
 ):
     args: dict[str, str] = {}
     if error:
-        args["error"] = error
+        # Belt and braces for SEC-04: nothing user-visible — and therefore nothing that
+        # ends up in the `Location` header, the address bar or a proxy access log — may
+        # carry a webhook key.
+        args["error"] = redact(error)
     if notice:
-        args["notice"] = notice
+        args["notice"] = redact(notice)
     response = redirect(url_for("notification_page", **args))
     if anchor:
         response.headers["Location"] = f"{response.headers['Location']}#{anchor}"
@@ -693,7 +891,7 @@ def _send_batch_notice(
     url = resolve_default_webhook_url(status_file, settings)
     if not url:
         return
-    client = WeComWebhookClient(url)
+    client = _webhook_client(url)
     if mention_all:
         client.send_text(message, mentioned_list=["@all"])
     else:
@@ -701,22 +899,131 @@ def _send_batch_notice(
 
 
 def mask_webhook_url(url: str) -> str:
-    """Hide the middle of the webhook key so it is safe to show on screen."""
-    value = (url or "").strip()
-    if not value:
-        return "未配置"
-    match = re.search(r"([?&]key=)([^&#]+)", value)
-    if match:
-        key = match.group(2)
-        masked = "****" if len(key) <= 8 else f"{key[:4]}****{key[-4:]}"
-        return f"{value[: match.start(2)]}{masked}{value[match.end(2):]}"
-    if len(value) <= 24:
-        return value
-    return f"{value[:16]}****{value[-6:]}"
+    """Hide the middle of the webhook key so it is safe to show on screen.
+
+    Re-exported from `qwbot.security` — `scripts/local-deploy.sh status` reads it here,
+    so there stays exactly one masking implementation in the project.
+    """
+    return mask_webhook_url_impl(url)
 
 
-def _is_valid_webhook_url(url: str) -> bool:
-    return url.startswith("http://") or url.startswith("https://")
+def _validate_webhook_url(url: str) -> tuple[bool, str]:
+    """SEC-03: scheme, host whitelist and private-address refusal for a submitted URL."""
+    settings = _current_settings()
+    return validate_webhook_url(
+        url,
+        extra_hosts=settings.allowed_webhook_hosts if settings else (),
+        allow_local=bool(settings and settings.allow_insecure_local_webhooks),
+    )
+
+
+def _webhook_client(url: str) -> WeComWebhookClient:
+    """A send client that re-checks SEC-03 with the serving app's whitelist (H-1).
+
+    The form validation above only guards what an operator types into the panel. A stored
+    row can arrive from `.env` seeding, a restored backup, or an older build, so every
+    outbound request is checked again at the transport boundary — which also covers the
+    scheduler path that never touches these routes.
+    """
+    settings = _current_settings()
+    return WeComWebhookClient(
+        url,
+        allowed_hosts=settings.allowed_webhook_hosts if settings else None,
+        allow_local=bool(settings and settings.allow_insecure_local_webhooks),
+    )
+
+
+def _classify_send_failure(exc: BaseException, url: str | None = None) -> str:
+    """SEC-04: a category hint for the UI, never a byte of the original exception."""
+    secrets_to_hide = [url] if url else []
+    if url:
+        match = re.search(r"([?&]key=)([^&#]+)", url, re.IGNORECASE)
+        if match:
+            secrets_to_hide.append(match.group(2))
+    message = _classify_send_error_impl(exc, secrets_to_hide)
+    # The category text is ours, but an operator-supplied name can ride along in some
+    # messages; scrub it the same way every other user-visible string is scrubbed.
+    return redact(message)
+
+
+def _log_send_exception(context: str, exc: BaseException, urls: list[str]) -> None:
+    """Write the full failure server-side, with every key masked before it hits disk."""
+    detail = redact(f"{context}: {type(exc).__name__}: {exc}")
+    for url in urls:
+        if url:
+            detail = detail.replace(url, mask_webhook_url(url))
+    logger.warning("%s", detail)
+
+
+def _current_settings() -> Settings | None:
+    """The `Settings` bound to the app serving this request (see `create_app`)."""
+    try:
+        from flask import current_app
+
+        return current_app.extensions.get("qwbot_settings")  # type: ignore[union-attr]
+    except Exception:  # noqa: BLE001 - outside an app context
+        return None
+
+
+# ---------------------------------------------------------------------------
+# SEC-01: session login + CSRF helpers
+# ---------------------------------------------------------------------------
+
+_SECURING_MARKERS: set[str] = set()
+
+
+def _endpoint_needs_auth(endpoint: str) -> bool:
+    """True when the route was declared with `@secured` or is the notification panel."""
+    if not endpoint:
+        return False
+    if endpoint == "notification_page":
+        return True
+    if endpoint in _SECURING_MARKERS:
+        return True
+    view = None
+    try:
+        from flask import current_app
+
+        view = current_app.view_functions.get(endpoint)
+    except Exception:  # noqa: BLE001 - outside an app context
+        view = None
+    if view and getattr(view, "__qwbot_secured__", False):
+        _SECURING_MARKERS.add(endpoint)
+        return True
+    return False
+
+
+def _is_authenticated() -> bool:
+    return bool(session.get(SESSION_LOGGED_IN_KEY))
+
+
+def _csrf_token() -> str:
+    token = session.get(CSRF_SESSION_KEY)
+    if not token:
+        token = secrets.token_urlsafe(32)
+        session[CSRF_SESSION_KEY] = token
+    return token
+
+
+def _safe_next(target: str | None) -> str:
+    """Only ever follow a same-site relative path; anything else lands on the panel."""
+    if not target:
+        return url_for("notification_page")
+    candidate = unquote(target)
+    if candidate.startswith("//") or not candidate.startswith("/"):
+        return url_for("notification_page")
+    parsed = urlparse(candidate)
+    if parsed.netloc or parsed.scheme:
+        return url_for("notification_page")
+    return candidate or url_for("notification_page")
+
+
+def _login_response(error: str, next_url: str | None = None) -> str:
+    return render_template(
+        "login.html",
+        error=redact(error),
+        next=(next_url if next_url is not None else (request.args.get("next") or "")),
+    )
 
 
 def _find_webhook_by_url(
@@ -1178,9 +1485,15 @@ def _archive_completed_from_previous_days(
             item["archived_on"] = today
             changed = True
     if changed:
-        for item in payload["batch_plan"]:
-            if _is_archived(item) and item.get("archived_on") == today:
-                update_item(status_file, "batch_plan", int(item["id"]), item)
+        # P1: one transaction for the whole sweep. Row-by-row `update_item` meant a
+        # connect + commit per batch, which cost ~3.7 s on 400 rows of first-run archive.
+        pending = [
+            (int(item["id"]), item)
+            for item in payload["batch_plan"]
+            if _is_archived(item) and item.get("archived_on") == today
+        ]
+        if pending:
+            write_items(status_file, "batch_plan", updates=pending)
 
 
 def _today_iso(timezone: str) -> str:

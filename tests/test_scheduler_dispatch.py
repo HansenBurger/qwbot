@@ -19,7 +19,15 @@ class FakeWebhookClient:
 
     sent: list[dict[str, Any]] = []
 
-    def __init__(self, webhook_url: str, timeout_seconds: int = 10) -> None:
+    def __init__(
+        self,
+        webhook_url: str,
+        timeout_seconds: int = 10,
+        *,
+        allowed_hosts: Any = None,
+        allow_local: bool = False,
+        enforce_allowlist: bool = True,
+    ) -> None:
         self.webhook_url = webhook_url
 
     def send_markdown(self, content: str) -> None:
